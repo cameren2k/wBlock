@@ -20415,6 +20415,38 @@ function _toPrimitive(t, r) { if ("object" != typeof t || !t) return t; var e = 
    * @param sender The sender of the message.
    * @returns The response message from the native host.
    */
+  const FORBIDDEN_GM_XHR_HEADER_NAMES = new Set([
+    "accept-charset",
+    "accept-encoding",
+    "access-control-request-headers",
+    "access-control-request-method",
+    "connection",
+    "content-length",
+    "cookie",
+    "date",
+    "dnt",
+    "host",
+    "keep-alive",
+    "origin",
+    "permissions-policy",
+    "referer",
+    "referrer",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+    "user-agent",
+    "via"
+  ]);
+  const shouldUseNativeGMXmlhttpRequest = headers => {
+    if (!headers || typeof headers !== "object") {
+      return false;
+    }
+    return Object.keys(headers).some(name => {
+      const normalized = String(name || "").trim().toLowerCase();
+      return FORBIDDEN_GM_XHR_HEADER_NAMES.has(normalized) || normalized.startsWith("proxy-") || normalized.startsWith("sec-");
+    });
+  };
   const handleMessages = async (request, sender) => {
     var _sender$tab, _sender$tab2;
     // Cast the incoming request to `Message`.
@@ -20528,13 +20560,29 @@ function _toPrimitive(t, r) { if ("object" != typeof t || !t) return t; var e = 
     }
     if (message && message.action === "gmXmlhttpRequest") {
       try {
+        const requestHeaders = message.headers || {};
+        if (shouldUseNativeGMXmlhttpRequest(requestHeaders)) {
+          const nativeRequest = {
+            action: "gmXmlhttpRequestNative",
+            requestId: "userscript-gmxhr-native-" + Date.now(),
+            url: message.url,
+            method: message.method || 'GET',
+            headers: requestHeaders,
+            body: message.body || null,
+            anonymous: message.anonymous === true,
+            responseType: message.responseType || 'text'
+          };
+          const nativeResponse = await browser.runtime.sendNativeMessage("application.id", nativeRequest);
+          return nativeResponse || { error: "Empty response from native host" };
+        }
+
         const fetchOptions = {
           method: message.method || 'GET',
-          headers: message.headers || {},
+          headers: requestHeaders,
           credentials: message.anonymous ? 'omit' : 'include'
         };
         const httpMethod = (message.method || 'GET').toUpperCase();
-        if (message.body && (httpMethod === 'POST' || httpMethod === 'PUT' || httpMethod === 'PATCH')) {
+        if (message.body && httpMethod !== 'GET' && httpMethod !== 'HEAD') {
           fetchOptions.body = message.body;
         }
         const fetchResponse = await fetch(message.url, fetchOptions);

@@ -76,6 +76,9 @@ public enum WebExtensionRequestHandler {
             case "deleteUserScriptStorageValue":
                 handleDeleteUserScriptStorageValue(message: message!, context: context)
                 return
+            case "gmXmlhttpRequestNative", "gmXmlhttpRequest":
+                handleNativeGMXmlhttpRequest(message: message!, context: context)
+                return
             case "getSiteDisabledState":
                 handleGetSiteDisabledState(message: message!, context: context)
                 return
@@ -565,6 +568,101 @@ public enum WebExtensionRequestHandler {
                 : ["ok": false, "error": result.error ?? "Failed to persist userscript storage"] )
             context.completeRequest(returningItems: [response])
         }
+    }
+
+    private static func handleNativeGMXmlhttpRequest(message: [String: Any?], context: NSExtensionContext) {
+        guard let urlString = message["url"] as? String,
+              let url = URL(string: urlString)
+        else {
+            let response = createResponse(with: ["error": "Missing or invalid URL"])
+            context.completeRequest(returningItems: [response])
+            return
+        }
+
+        let method = ((message["method"] as? String) ?? "GET")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .uppercased()
+        let headers = (message["headers"] as? [String: Any])?.reduce(into: [String: String]()) { partial, entry in
+            partial[entry.key] = String(describing: entry.value)
+        } ?? [:]
+        let body = message["body"] as? String
+        let anonymous = message["anonymous"] as? Bool ?? false
+
+        Task {
+            let result = await performNativeGMXmlhttpRequest(
+                url: url,
+                method: method.isEmpty ? "GET" : method,
+                headers: headers,
+                body: body,
+                anonymous: anonymous
+            )
+            let response = createResponse(with: result)
+            context.completeRequest(returningItems: [response])
+        }
+    }
+
+    private static func performNativeGMXmlhttpRequest(
+        url: URL,
+        method: String,
+        headers: [String: String],
+        body: String?,
+        anonymous: Bool
+    ) async -> [String: Any?] {
+        let configuration = anonymous ? URLSessionConfiguration.ephemeral : URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 60
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
+        if anonymous {
+            configuration.httpCookieStorage = nil
+            configuration.httpShouldSetCookies = false
+        }
+
+        let session = URLSession(configuration: configuration)
+        defer { session.finishTasksAndInvalidate() }
+
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+        request.httpMethod = method
+        headers.forEach { key, value in
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        if let body, !body.isEmpty, method != "GET", method != "HEAD" {
+            request.httpBody = Data(body.utf8)
+        }
+
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                return ["error": "Invalid HTTP response"]
+            }
+
+            let responseHeaders = httpResponse.allHeaderFields.reduce(into: [String: String]()) { partial, entry in
+                guard let key = entry.key as? String else { return }
+                partial[key] = String(describing: entry.value)
+            }
+            let responseText = decodeNativeGMXmlhttpResponseText(data)
+
+            return [
+                "status": httpResponse.statusCode,
+                "statusText": HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode),
+                "responseHeaders": responseHeaders,
+                "responseText": responseText,
+                "response": responseText,
+                "finalUrl": httpResponse.url?.absoluteString ?? url.absoluteString
+            ]
+        } catch {
+            return ["error": error.localizedDescription]
+        }
+    }
+
+    private static func decodeNativeGMXmlhttpResponseText(_ data: Data) -> String {
+        if let utf8 = String(data: data, encoding: .utf8) {
+            return utf8
+        }
+        if let latin1 = String(data: data, encoding: .isoLatin1) {
+            return latin1
+        }
+        return String(decoding: data, as: UTF8.self)
     }
 
     private static func handleSyncZapperRules(message: [String: Any?], context: NSExtensionContext) {
