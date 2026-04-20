@@ -417,6 +417,102 @@ async function shouldShowOpenAppButton() {
         return false;
     }
 }
+function getClosestTarget(event, selector) {
+    if (!event || !event.target || !event.target.closest) return null;
+    return event.target.closest(selector);
+}
+
+function renderUserscriptCommands(commands) {
+    const container = document.getElementById('userscript-commands');
+    if (!container) return;
+    container.innerHTML = '';
+
+    if (!Array.isArray(commands) || commands.length === 0) {
+        container.hidden = true;
+        return;
+    }
+
+    const list = document.createElement('div');
+    list.className = 'command-list';
+
+    for (const command of commands) {
+        if (!command || typeof command.caption !== 'string' || !command.caption.trim()) continue;
+
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'btn command-btn';
+        button.setAttribute('data-bridge-id', command.bridgeId);
+        button.setAttribute('data-command-id', command.commandId);
+        button.setAttribute('data-frame-id', String(typeof command.frameId === 'number' ? command.frameId : 0));
+
+        const label = document.createElement('span');
+        label.className = 'command-label';
+        label.textContent = command.caption;
+        button.appendChild(label);
+
+        const metaParts = [];
+        if (typeof command.scriptName === 'string' && command.scriptName.trim()) metaParts.push(command.scriptName.trim());
+        if (typeof command.frameId === 'number' && command.frameId !== 0) metaParts.push(`#${command.frameId}`);
+        if (typeof command.title === 'string' && command.title.trim()) metaParts.push(command.title.trim());
+        if (metaParts.length > 0) {
+            const meta = document.createElement('span');
+            meta.className = 'command-meta';
+            meta.textContent = metaParts.join(', ');
+            button.appendChild(meta);
+        }
+
+        list.appendChild(button);
+    }
+
+    if (list.childElementCount === 0) {
+        container.hidden = true;
+        return;
+    }
+
+    container.appendChild(list);
+    container.hidden = false;
+}
+
+async function fetchUserscriptCommands(tabId) {
+    if (!tabId) return [];
+    try {
+        const response = await browser.runtime.sendMessage({
+            action: 'wblock:menu:getCommands',
+            tabId,
+        });
+        if (!response || !Array.isArray(response.commands)) {
+            return [];
+        }
+        return response.commands.filter((command) => (
+            command
+            && typeof command.bridgeId === 'string'
+            && typeof command.commandId === 'string'
+            && typeof command.caption === 'string'
+            && command.caption.trim().length > 0
+        ));
+    } catch (error) {
+        console.warn('[wBlock] Failed to fetch userscript commands:', error);
+        return [];
+    }
+}
+
+async function invokeUserscriptCommand(tabId, frameId, bridgeId, commandId) {
+    if (!tabId || !bridgeId || !commandId) {
+        return { ok: false, error: 'Invalid menu command request' };
+    }
+    try {
+        const response = await browser.runtime.sendMessage({
+            action: 'wblock:menu:invokeCommand',
+            tabId,
+            frameId,
+            bridgeId,
+            commandId,
+        });
+        return response || { ok: false, error: 'Menu command invocation returned no response' };
+    } catch (error) {
+        return { ok: false, error: error && error.message ? error.message : String(error) };
+    }
+}
 
 function setupListeners() {
     const rulesToggle = document.getElementById('zapper-rules-toggle');
@@ -424,6 +520,7 @@ function setupListeners() {
     const disableToggle = document.getElementById('disable-toggle');
     const zapperActivate = document.getElementById('zapper-activate');
     const zapperClear = document.getElementById('zapper-clear');
+    const userscriptCommands = document.getElementById('userscript-commands');
     const openAppButton = document.getElementById('open-app');
 
     if (rulesToggle) {
@@ -443,7 +540,7 @@ function setupListeners() {
 
     if (rulesContainer) {
         rulesContainer.addEventListener('click', async (event) => {
-            const element = event && event.target && event.target.closest ? event.target.closest('button.rule-delete') : null;
+            const element = getClosestTarget(event, 'button.rule-delete');
             if (!element) return;
             const idx = Number(element.getAttribute('data-index'));
             if (!Number.isFinite(idx) || idx < 0 || idx >= currentZapperRules.length) return;
@@ -505,6 +602,32 @@ function setupListeners() {
             } catch (error) {
                 console.error('[wBlock] Failed to activate zapper:', error);
                 setError(t('popup_error_zapper_unavailable', undefined, 'Element Zapper is unavailable on this page.'));
+            }
+        });
+    }
+
+    if (userscriptCommands) {
+        userscriptCommands.addEventListener('click', async (event) => {
+            const button = getClosestTarget(event, 'button.command-btn');
+            if (!button || !tab || !tab.id) return;
+
+            const bridgeId = button.getAttribute('data-bridge-id') || '';
+            const commandId = button.getAttribute('data-command-id') || '';
+            const frameId = Number(button.getAttribute('data-frame-id'));
+            if (!bridgeId || !commandId || !Number.isFinite(frameId)) return;
+
+            try {
+                setError('');
+                button.disabled = true;
+                const response = await invokeUserscriptCommand(tab.id, frameId, bridgeId, commandId);
+                if (!response || response.ok === false) {
+                    throw new Error((response && response.error) || t('popup_error_load_popup', undefined, 'Failed to load popup.'));
+                }
+                await refreshUi();
+            } catch (error) {
+                console.error('[wBlock] Failed to invoke userscript menu command:', error);
+                setError((error && error.message) || t('popup_error_load_popup', undefined, 'Failed to load popup.'));
+                button.disabled = false;
             }
         });
     }
@@ -576,6 +699,7 @@ async function refreshUi() {
         if (disableToggle) disableToggle.disabled = true;
         if (zapperActivate) zapperActivate.disabled = true;
         if (rulesToggle) rulesToggle.disabled = true;
+        renderUserscriptCommands([]);
         await logExtensionDiagnostic({
             event: 'popup_support_fallback',
             source: 'popup',
@@ -607,6 +731,7 @@ async function refreshUi() {
     }
     currentZapperRules = await getAuthoritativeZapperRules(host);
     await updateZapperCount(host);
+    renderUserscriptCommands(await fetchUserscriptCommands(tab.id));
 
     if (zapperRulesExpanded) {
         renderZapperRules(currentZapperRules);

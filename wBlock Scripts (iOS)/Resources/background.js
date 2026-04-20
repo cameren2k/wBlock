@@ -20496,6 +20496,36 @@ function _toPrimitive(t, r) { if ("object" != typeof t || !t) return t; var e = 
         return { ok: false, error: String(error && error.message ? error.message : error) };
       }
     }
+    if (message && message.action === "wblock:menu:updateFrameCommands") {
+      const tabId = ((_sender$tab = sender.tab) === null || _sender$tab === void 0 ? void 0 : _sender$tab.id) ?? 0;
+      const frameId = sender.frameId ?? 0;
+      setFrameMenuCommands(tabId, frameId, message.commands);
+      return { ok: true };
+    }
+    if (message && message.action === "wblock:menu:getCommands") {
+      const tabId = typeof message.tabId === "number" ? message.tabId : (((_sender$tab = sender.tab) === null || _sender$tab === void 0 ? void 0 : _sender$tab.id) ?? 0);
+      await refreshTabMenuCommands(tabId);
+      return { ok: true, commands: getTabMenuCommands(tabId) };
+    }
+    if (message && message.action === "wblock:menu:invokeCommand") {
+      const tabId = typeof message.tabId === "number" ? message.tabId : (((_sender$tab = sender.tab) === null || _sender$tab === void 0 ? void 0 : _sender$tab.id) ?? 0);
+      const frameId = typeof message.frameId === "number" ? message.frameId : 0;
+      if (!tabId) {
+        return { ok: false, error: "Missing tab" };
+      }
+      try {
+        const response = await browser.tabs.sendMessage(tabId, {
+          type: "wblock:menu:invokeCommand",
+          bridgeId: message.bridgeId,
+          commandId: message.commandId
+        }, {
+          frameId
+        });
+        return response || { ok: false, error: "Empty response from content script" };
+      } catch (error) {
+        return { ok: false, error: String(error && error.message ? error.message : error) };
+      }
+    }
     if (message && message.action === "gmXmlhttpRequest") {
       try {
         const fetchOptions = {
@@ -20584,6 +20614,71 @@ function _toPrimitive(t, r) { if ("object" != typeof t || !t) return t; var e = 
   const canSetActionPopup = typeof browser !== "undefined" && !!(browser.action && browser.action.setPopup);
   const canObserveTabs = typeof browser !== "undefined" && !!browser.tabs;
   const supportStateByTab = new Map();
+  const menuCommandsByTab = new Map();
+  const normalizeMenuCommands = commands => Array.isArray(commands) ? commands.filter(command => command && typeof command === "object").map(command => ({
+    bridgeId: typeof command.bridgeId === "string" ? command.bridgeId : "",
+    commandId: typeof command.commandId === "string" ? command.commandId : "",
+    caption: typeof command.caption === "string" ? command.caption : "",
+    title: typeof command.title === "string" ? command.title : "",
+    accessKey: typeof command.accessKey === "string" ? command.accessKey : "",
+    scriptName: typeof command.scriptName === "string" ? command.scriptName : "",
+    sortOrder: Number.isFinite(Number(command.sortOrder)) ? Number(command.sortOrder) : 0
+  })).filter(command => command.bridgeId && command.commandId && command.caption.trim()) : [];
+  const setFrameMenuCommands = (tabId, frameId, commands) => {
+    if (typeof tabId !== "number") {
+      return;
+    }
+    const normalized = normalizeMenuCommands(commands).map(command => ({
+      ...command,
+      frameId
+    }));
+    const frameCommands = menuCommandsByTab.get(tabId) || new Map();
+    if (normalized.length === 0) {
+      frameCommands.delete(frameId);
+    } else {
+      frameCommands.set(frameId, normalized);
+    }
+    if (frameCommands.size === 0) {
+      menuCommandsByTab.delete(tabId);
+    } else {
+      menuCommandsByTab.set(tabId, frameCommands);
+    }
+  };
+  const getTabMenuCommands = tabId => {
+    if (typeof tabId !== "number") {
+      return [];
+    }
+    const frameCommands = menuCommandsByTab.get(tabId);
+    if (!frameCommands) {
+      return [];
+    }
+    const commands = [];
+    frameCommands.forEach(frameList => {
+      commands.push(...frameList);
+    });
+    commands.sort((left, right) => {
+      const leftTop = left.frameId === 0 ? 0 : 1;
+      const rightTop = right.frameId === 0 ? 0 : 1;
+      if (leftTop !== rightTop) return leftTop - rightTop;
+      if (left.frameId !== right.frameId) return left.frameId - right.frameId;
+      if (left.sortOrder !== right.sortOrder) return left.sortOrder - right.sortOrder;
+      return left.caption.localeCompare(right.caption);
+    });
+    return commands;
+  };
+  const refreshTabMenuCommands = async tabId => {
+    if (!canObserveTabs || !browser.tabs.sendMessage || typeof tabId !== "number" || !tabId) {
+      return;
+    }
+    try {
+      await browser.tabs.sendMessage(tabId, {
+        type: "wblock:menu:syncState"
+      });
+    } catch (_unused) {}
+    await new Promise(resolve => {
+      setTimeout(resolve, 30);
+    });
+  };
   const normalizeDiagnosticFields = fields => {
     const entries = Object.entries(fields).filter(([, value]) => value !== undefined && value !== null && value !== "");
     return Object.fromEntries(entries.map(([key, value]) => [key, String(value)]));
@@ -20777,6 +20872,9 @@ function _toPrimitive(t, r) { if ("object" != typeof t || !t) return t; var e = 
         if (!tab) {
           return;
         }
+        if (changeInfo && (changeInfo.status === "loading" || typeof changeInfo.url === "string")) {
+          menuCommandsByTab.delete(tab.id);
+        }
         if (changeInfo && changeInfo.status && changeInfo.status !== "complete" && !changeInfo.url) {
           return;
         }
@@ -20801,6 +20899,7 @@ function _toPrimitive(t, r) { if ("object" != typeof t || !t) return t; var e = 
     if (browser.tabs.onRemoved) {
       browser.tabs.onRemoved.addListener(tabId => {
         supportStateByTab.delete(tabId);
+        menuCommandsByTab.delete(tabId);
       });
     }
   }

@@ -90,6 +90,11 @@ if (window.wBlockUserscriptInjectorHasRun) {
             this.messageListenerAttached = false; // Ensure listener is attached only once
             this.pendingNativeRequests = new Map(); // requestId -> { resolve, reject, timeoutId }
             this.storageBridgeScriptIDs = new Map(); // bridgeId -> scriptId
+            this.pageMenuBridgeElements = new Map(); // bridgeId -> script element
+            this.contentMenuCommandCallbacks = new Map(); // bridgeId -> Map(commandId, callback)
+            this.registeredMenuCommands = new Map(); // bridgeId -> Map(commandId, descriptor)
+            this.pendingMenuInvocations = new Map(); // requestId -> { resolve, timeoutId }
+            this.menuCommandSequence = 0;
             wBlockLog('[wBlock] UserScriptEngine constructor called.');
             this.init();
         }
@@ -101,6 +106,10 @@ if (window.wBlockUserscriptInjectorHasRun) {
             // On Safari App Extensions, responses can arrive very quickly and be missed
             // if the listener isn't attached yet.
             this.setupMessageListener();
+
+            // Bridge GM menu command registration/invocation between userscripts
+            // and the extension popup.
+            this.setupMenuCommandBridge();
 
             // Bridge page-context GM storage writes through the extension/native layer.
             this.setupStorageBridge();
@@ -184,6 +193,189 @@ if (window.wBlockUserscriptInjectorHasRun) {
                             error: errorMessage
                         }, '*');
                     });
+            });
+        }
+
+        setupMenuCommandBridge() {
+            window.__wBlockMenuCommandBridge = {
+                registerMenuCommand: (bridgeId, commandId, details, callback) => {
+                    if (typeof callback !== 'function') return;
+
+                    let callbacks = this.contentMenuCommandCallbacks.get(bridgeId);
+                    if (!callbacks) {
+                        callbacks = new Map();
+                        this.contentMenuCommandCallbacks.set(bridgeId, callbacks);
+                    }
+                    callbacks.set(commandId, callback);
+                    this.registerMenuCommandDescriptor(bridgeId, commandId, details);
+                },
+                unregisterMenuCommand: (bridgeId, commandId) => {
+                    const callbacks = this.contentMenuCommandCallbacks.get(bridgeId);
+                    if (callbacks) {
+                        callbacks.delete(commandId);
+                        if (callbacks.size === 0) {
+                            this.contentMenuCommandCallbacks.delete(bridgeId);
+                        }
+                    }
+                    this.unregisterMenuCommandDescriptor(bridgeId, commandId);
+                }
+            };
+
+            window.addEventListener('pagehide', () => {
+                this.pageMenuBridgeElements.clear();
+                this.contentMenuCommandCallbacks.clear();
+                this.registeredMenuCommands.clear();
+                this.syncMenuCommandsToBackground();
+            }, { once: true });
+        }
+
+        registerMenuCommandDescriptor(bridgeId, commandId, details = {}) {
+            if (typeof bridgeId !== 'string' || typeof commandId !== 'string') {
+                return;
+            }
+
+            const bridgeCommands = this.registeredMenuCommands.get(bridgeId) || new Map();
+            const existing = bridgeCommands.get(commandId);
+            bridgeCommands.set(commandId, {
+                bridgeId,
+                commandId,
+                caption: typeof details.caption === 'string' ? details.caption : '',
+                title: typeof details.title === 'string' ? details.title : '',
+                accessKey: typeof details.accessKey === 'string' ? details.accessKey : '',
+                scriptName: typeof details.scriptName === 'string' ? details.scriptName : '',
+                sortOrder: existing ? existing.sortOrder : (++this.menuCommandSequence)
+            });
+            this.registeredMenuCommands.set(bridgeId, bridgeCommands);
+            this.syncMenuCommandsToBackground();
+        }
+
+        unregisterMenuCommandDescriptor(bridgeId, commandId) {
+            if (typeof bridgeId !== 'string' || typeof commandId !== 'string') {
+                return;
+            }
+
+            const bridgeCommands = this.registeredMenuCommands.get(bridgeId);
+            if (!bridgeCommands) {
+                return;
+            }
+
+            bridgeCommands.delete(commandId);
+            if (bridgeCommands.size === 0) {
+                this.registeredMenuCommands.delete(bridgeId);
+            }
+            this.syncMenuCommandsToBackground();
+        }
+
+        syncMenuCommandsToBackground() {
+            if (!(typeof browser !== 'undefined' && browser.runtime && browser.runtime.sendMessage)) {
+                return;
+            }
+
+            browser.runtime.sendMessage({
+                action: 'wblock:menu:updateFrameCommands',
+                commands: this.getRegisteredMenuCommands()
+            }).catch((error) => {
+                wBlockWarn('[wBlock] Failed to sync menu commands to background:', error);
+            });
+        }
+
+        attachPageMenuCommandBridge(scriptElement, script) {
+            const bridgeId = script && script.menuBridgeId;
+            if (!bridgeId || !scriptElement) {
+                return;
+            }
+
+            this.pageMenuBridgeElements.set(bridgeId, scriptElement);
+            scriptElement.addEventListener('wblock-gm-menu-register', (event) => {
+                const detail = event && event.detail ? event.detail : {};
+                if (detail.bridgeId !== bridgeId || typeof detail.commandId !== 'string' || typeof detail.caption !== 'string') {
+                    return;
+                }
+                this.registerMenuCommandDescriptor(bridgeId, detail.commandId, detail);
+            });
+
+            scriptElement.addEventListener('wblock-gm-menu-unregister', (event) => {
+                const detail = event && event.detail ? event.detail : {};
+                if (detail.bridgeId !== bridgeId || typeof detail.commandId !== 'string') {
+                    return;
+                }
+                this.unregisterMenuCommandDescriptor(bridgeId, detail.commandId);
+            });
+
+            scriptElement.addEventListener('wblock-gm-menu-invoke-result', (event) => {
+                const detail = event && event.detail ? event.detail : {};
+                if (detail.bridgeId !== bridgeId || typeof detail.requestId !== 'string') {
+                    return;
+                }
+
+                const pending = this.pendingMenuInvocations.get(detail.requestId);
+                if (!pending) {
+                    return;
+                }
+
+                this.pendingMenuInvocations.delete(detail.requestId);
+                clearTimeout(pending.timeoutId);
+                pending.resolve({
+                    ok: detail.success !== false,
+                    error: typeof detail.error === 'string' ? detail.error : ''
+                });
+            });
+        }
+
+        getRegisteredMenuCommands() {
+            const commands = [];
+            this.registeredMenuCommands.forEach((bridgeCommands) => {
+                bridgeCommands.forEach((descriptor) => {
+                    commands.push(descriptor);
+                });
+            });
+
+            commands.sort((left, right) => left.sortOrder - right.sortOrder);
+            return commands.map(({ bridgeId, commandId, caption, title, accessKey, scriptName, sortOrder }) => ({
+                bridgeId,
+                commandId,
+                caption,
+                title,
+                accessKey,
+                scriptName,
+                sortOrder
+            }));
+        }
+
+        async invokeMenuCommand(bridgeId, commandId) {
+            if (typeof bridgeId !== 'string' || typeof commandId !== 'string') {
+                return { ok: false, error: 'Invalid menu command request' };
+            }
+
+            const contentCallbacks = this.contentMenuCommandCallbacks.get(bridgeId);
+            if (contentCallbacks && contentCallbacks.has(commandId)) {
+                try {
+                    await Promise.resolve(contentCallbacks.get(commandId)());
+                    return { ok: true, error: '' };
+                } catch (error) {
+                    return {
+                        ok: false,
+                        error: error && error.message ? error.message : String(error)
+                    };
+                }
+            }
+
+            const bridgeElement = this.pageMenuBridgeElements.get(bridgeId);
+            if (!bridgeElement) {
+                return { ok: false, error: 'Menu command not found' };
+            }
+
+            const requestId = this.generateRequestId('gmmenuinvoke');
+            return await new Promise((resolve) => {
+                const timeoutId = setTimeout(() => {
+                    this.pendingMenuInvocations.delete(requestId);
+                    resolve({ ok: false, error: 'Menu command timed out' });
+                }, 15000);
+
+                this.pendingMenuInvocations.set(requestId, { resolve, timeoutId });
+                bridgeElement.dispatchEvent(new CustomEvent('wblock-gm-menu-invoke', {
+                    detail: { bridgeId, commandId, requestId }
+                }));
             });
         }
 
@@ -387,6 +579,16 @@ if (window.wBlockUserscriptInjectorHasRun) {
                 wBlockLog('[wBlock] Using browser.runtime.onMessage for listening.');
                 browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     wBlockLog('[wBlock] Received message via browser.runtime.onMessage:', JSON.parse(JSON.stringify(message || {})));
+
+                    if (message && message.type === 'wblock:menu:invokeCommand') {
+                        return this.invokeMenuCommand(message.bridgeId, message.commandId);
+                    }
+
+                    if (message && message.type === 'wblock:menu:syncState') {
+                        this.syncMenuCommandsToBackground();
+                        return Promise.resolve({ ok: true });
+                    }
+
                     let scriptsToInject = null;
                     if (message && message.userScripts) {
                         scriptsToInject = message.userScripts;
@@ -400,6 +602,7 @@ if (window.wBlockUserscriptInjectorHasRun) {
                     } else {
                         wBlockLog('[wBlock] No userscripts found in received message (browser.runtime.onMessage).');
                     }
+
                 });
                 this.messageListenerAttached = true;
                 wBlockLog('[wBlock] browser.runtime.onMessage listener attached.');
@@ -497,6 +700,9 @@ if (window.wBlockUserscriptInjectorHasRun) {
                     fullScript.storageBridgeId = this.generateRequestId('gmstorage');
                     this.storageBridgeScriptIDs.set(fullScript.storageBridgeId, fullScript.id);
                 }
+                if (fullScript.id && !fullScript.menuBridgeId) {
+                    fullScript.menuBridgeId = this.generateRequestId('gmmenu');
+                }
 
                 const injectInto = fullScript.injectInto || 'page';
                 wBlockLog(`[wBlock] Injecting userscript: ${fullScript.name} (mode: ${injectInto})`);
@@ -535,6 +741,9 @@ if (window.wBlockUserscriptInjectorHasRun) {
             const nonce = getCspNonce();
             if (nonce) {
                 scriptElement.nonce = nonce;
+            }
+            if (script.menuBridgeId) {
+                this.attachPageMenuCommandBridge(scriptElement, script);
             }
             (document.head || document.documentElement).appendChild(scriptElement);
             scriptElement.remove();
@@ -679,8 +888,12 @@ if (window.wBlockUserscriptInjectorHasRun) {
     // Storage change listeners registry
     const storageListeners = new Map(); // key -> Map(listenerId, callback)
     const pendingStorageRequests = new Map(); // requestId -> { onFailure, timeoutId }
+    const menuCommandCallbacks = new Map(); // commandId -> callback
     let listenerIdCounter = 0;
     const storageBridgeId = '${escapeForJS(script.storageBridgeId || '')}';
+    const menuBridgeId = '${escapeForJS(script.menuBridgeId || '')}';
+    const pageMenuBridgeElement = ${isContentContext ? 'null' : 'document.currentScript'};
+    const contentMenuBridge = ${isContentContext ? 'window.__wBlockMenuCommandBridge' : 'null'};
     const scriptStorageState = Object.assign({}, ${storageSnapshotJSON});
 
     const parseStoredValue = (rawValue) => {
@@ -714,6 +927,100 @@ if (window.wBlockUserscriptInjectorHasRun) {
             }
         });
     };
+
+    const postMenuCommandResult = (requestId, success, error) => {
+        if (!pageMenuBridgeElement || typeof requestId !== 'string' || requestId.length === 0) return;
+        pageMenuBridgeElement.dispatchEvent(new CustomEvent('wblock-gm-menu-invoke-result', {
+            detail: {
+                bridgeId: menuBridgeId,
+                requestId: requestId,
+                success: success !== false,
+                error: typeof error === 'string' ? error : ''
+            }
+        }));
+    };
+
+    const normalizeMenuCommandOptions = (accessKey) => {
+        if (typeof accessKey === 'string') {
+            return { accessKey: accessKey, title: '' };
+        }
+        if (accessKey && typeof accessKey === 'object') {
+            return {
+                accessKey: typeof accessKey.accessKey === 'string' ? accessKey.accessKey : '',
+                title: typeof accessKey.title === 'string' ? accessKey.title : ''
+            };
+        }
+        return { accessKey: '', title: '' };
+    };
+
+    const publishMenuCommand = (kind, commandId, details, callback) => {
+        if (!menuBridgeId || typeof commandId !== 'string' || commandId.length === 0) {
+            return;
+        }
+
+        const normalizedDetails = {
+            caption: typeof details.caption === 'string' ? details.caption : String(details.caption ?? ''),
+            title: typeof details.title === 'string' ? details.title : '',
+            accessKey: typeof details.accessKey === 'string' ? details.accessKey : '',
+            scriptName: '${escapeForJS(script.name || 'Unknown Script')}'
+        };
+
+        if (contentMenuBridge && kind === 'register' && typeof contentMenuBridge.registerMenuCommand === 'function') {
+            contentMenuBridge.registerMenuCommand(menuBridgeId, commandId, normalizedDetails, callback);
+            return;
+        }
+
+        if (contentMenuBridge && kind === 'unregister' && typeof contentMenuBridge.unregisterMenuCommand === 'function') {
+            contentMenuBridge.unregisterMenuCommand(menuBridgeId, commandId);
+            return;
+        }
+
+        if (!pageMenuBridgeElement) {
+            return;
+        }
+
+        pageMenuBridgeElement.dispatchEvent(new CustomEvent(
+            kind === 'register' ? 'wblock-gm-menu-register' : 'wblock-gm-menu-unregister',
+            {
+                detail: kind === 'register'
+                    ? { bridgeId: menuBridgeId, commandId: commandId, ...normalizedDetails }
+                    : { bridgeId: menuBridgeId, commandId: commandId }
+            }
+        ));
+    };
+
+    ${isContentContext ? `` : `
+    if (pageMenuBridgeElement) {
+        pageMenuBridgeElement.addEventListener('wblock-gm-menu-invoke', (event) => {
+            const detail = event && event.detail ? event.detail : {};
+            if (detail.bridgeId !== menuBridgeId || typeof detail.commandId !== 'string') return;
+
+            const callback = menuCommandCallbacks.get(detail.commandId);
+            if (!callback) {
+                postMenuCommandResult(detail.requestId, false, 'Menu command not found');
+                return;
+            }
+
+            try {
+                Promise.resolve(callback())
+                    .then(() => postMenuCommandResult(detail.requestId, true, ''))
+                    .catch((error) => {
+                        postMenuCommandResult(
+                            detail.requestId,
+                            false,
+                            error && error.message ? error.message : String(error)
+                        );
+                    });
+            } catch (error) {
+                postMenuCommandResult(
+                    detail.requestId,
+                    false,
+                    error && error.message ? error.message : String(error)
+                );
+            }
+        });
+    }
+    `}
 
     ${isContentContext ? `` : `
     window.addEventListener('message', (event) => {
@@ -860,30 +1167,40 @@ if (window.wBlockUserscriptInjectorHasRun) {
 
         try {
             if (match[2]) {
-                const binary = atob(match[3] || '');
-                const bytes = new Uint8Array(binary.length);
-                for (let i = 0; i < binary.length; i++) {
-                    bytes[i] = binary.charCodeAt(i);
-                }
-                return new TextDecoder('utf-8').decode(bytes);
+        registerMenuCommand: function(caption, callback, accessKey) {
+            wBlockLog('[wBlock] GM.registerMenuCommand called:', caption);
+            if (typeof callback !== 'function') {
+                wBlockWarn('[wBlock] Ignoring GM.registerMenuCommand with non-function callback:', caption);
+                return null;
             }
-            return decodeURIComponent(match[3] || '');
-        } catch (error) {
-            wBlockWarn('[wBlock] Failed to decode data URL resource text:', error);
-            return undefined;
-        }
-    };
 
-    const resolveResourceValue = (resourceName) => {
-        if (!scriptResources || !Object.prototype.hasOwnProperty.call(scriptResources, resourceName)) {
-            return undefined;
-        }
-        return scriptResources[resourceName];
-    };
+            const menuCommandId = 'menu-' + (++listenerIdCounter);
+            const normalizedCaption = typeof caption === 'string' ? caption : String(caption ?? '');
+            const options = normalizeMenuCommandOptions(accessKey);
+            menuCommandCallbacks.set(menuCommandId, callback);
+            publishMenuCommand('register', menuCommandId, {
+                caption: normalizedCaption,
+                title: options.title,
+                accessKey: options.accessKey
+            }, callback);
+            return menuCommandId;
+        },
 
-    const makeResourceURL = (resourceName) => {
-        const resourceValue = resolveResourceValue(resourceName);
-        if (typeof resourceValue !== 'string' || resourceValue.length === 0) {
+        unregisterMenuCommand: function(menuCommandId) {
+            wBlockLog('[wBlock] GM.unregisterMenuCommand called:', menuCommandId);
+            if (!menuCommandCallbacks.has(menuCommandId)) {
+                return;
+            }
+            menuCommandCallbacks.delete(menuCommandId);
+            publishMenuCommand('unregister', menuCommandId, {}, null);
+        },
+
+        getResourceURL: function(resourceName) {
+            const resolvedURL = makeResourceURL(resourceName);
+            if (resolvedURL) {
+                return resolvedURL;
+            }
+            wBlockWarn('[wBlock] Resource URL not found:', resourceName);
             return undefined;
         }
 
@@ -1059,14 +1376,30 @@ if (window.wBlockUserscriptInjectorHasRun) {
 
         registerMenuCommand: function(caption, callback, accessKey) {
             wBlockLog('[wBlock] GM.registerMenuCommand called:', caption);
-            // Menu commands are not supported in Safari extensions
-            // Return a mock ID for compatibility
-            return 'menu-' + (++listenerIdCounter);
+            if (typeof callback !== 'function') {
+                wBlockWarn('[wBlock] Ignoring GM.registerMenuCommand with non-function callback:', caption);
+                return null;
+            }
+
+            const menuCommandId = 'menu-' + (++listenerIdCounter);
+            const normalizedCaption = typeof caption === 'string' ? caption : String(caption ?? '');
+            const options = normalizeMenuCommandOptions(accessKey);
+            menuCommandCallbacks.set(menuCommandId, callback);
+            publishMenuCommand('register', menuCommandId, {
+                caption: normalizedCaption,
+                title: options.title,
+                accessKey: options.accessKey
+            });
+            return menuCommandId;
         },
 
         unregisterMenuCommand: function(menuCommandId) {
             wBlockLog('[wBlock] GM.unregisterMenuCommand called:', menuCommandId);
-            // No-op for compatibility
+            if (!menuCommandCallbacks.has(menuCommandId)) {
+                return;
+            }
+            menuCommandCallbacks.delete(menuCommandId);
+            publishMenuCommand('unregister', menuCommandId, {});
         },
 
         addStyle: function(css) {
