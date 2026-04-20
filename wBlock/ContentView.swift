@@ -1010,13 +1010,14 @@ struct AddFilterListView: View {
 	                        .autocorrectionDisabled()
 	                }
 
-	                VStack(alignment: .leading, spacing: 6) {
-	                    Text("Category")
-	                        .font(.caption)
-	                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Category")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
 
-                    userListCategoryPicker(selection: $selectedCategory)
-	                }
+                        userListCategoryPicker(selection: $selectedCategory)
+                            .labelsHidden()
+                    }
 
 	                urlFooterMessage
 	            }
@@ -1294,6 +1295,7 @@ struct AddFilterListView: View {
                     .foregroundStyle(.secondary)
 
                 userListCategoryPicker(selection: $selectedCategory)
+                    .labelsHidden()
             }
     }
     }
@@ -1624,6 +1626,7 @@ struct EditUserListView: View {
                                     .foregroundStyle(.secondary)
 
                                 userListCategoryPicker(selection: $selectedCategory)
+                                    .labelsHidden()
 
                                 Text(filter.url.absoluteString)
                                     .font(.caption2)
