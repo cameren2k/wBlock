@@ -775,6 +775,22 @@ struct ContentModifiers: ViewModifier {
     #endif
 }
 
+private extension FilterListCategory {
+    static var userListCategories: [FilterListCategory] {
+        [.custom] + allCases.filter { $0 != .all && $0 != .custom }
+    }
+}
+
+private func userListCategoryPicker(selection: Binding<FilterListCategory>) -> some View {
+    Picker("Category", selection: selection) {
+        ForEach(FilterListCategory.userListCategories) { category in
+            Text(category.localizedName).tag(category)
+        }
+    }
+    .pickerStyle(.menu)
+}
+
+
 struct AddFilterListView: View {
     @ObservedObject var filterManager: AppFilterManager
 
@@ -802,12 +818,6 @@ struct AddFilterListView: View {
 
     @State private var addMode: AddMode = .url
 
-    private var addableCategories: [FilterListCategory] {
-        let remainingCategories = FilterListCategory.allCases.filter { category in
-            category != .all && category != .custom
-        }
-        return [.custom] + remainingCategories
-    }
 
     private var validationState: ValidationState {
         validationState(for: urlInput)
@@ -867,11 +877,12 @@ struct AddFilterListView: View {
                     let title = userListTitle.trimmingCharacters(in: .whitespacesAndNewlines)
                     let description = userListDescription.trimmingCharacters(in: .whitespacesAndNewlines)
                     url.withSecurityScopedAccess { accessibleURL in
-                        filterManager.addUserListFromFile(
-                            accessibleURL,
-                            nameOverride: title,
-                            description: description.isEmpty ? nil : description
-                        )
+						filterManager.addUserListFromFile(
+							accessibleURL,
+							nameOverride: title,
+							description: description.isEmpty ? nil : description,
+							category: selectedCategory
+						)
                     }
                     if !filterManager.hasError {
                         dismiss()
@@ -1004,12 +1015,7 @@ struct AddFilterListView: View {
 	                        .font(.caption)
 	                        .foregroundStyle(.secondary)
 
-	                    Picker("Category", selection: $selectedCategory) {
-	                        ForEach(addableCategories) { category in
-	                            Text(category.localizedName).tag(category)
-	                        }
-	                    }
-	                    .pickerStyle(.menu)
+                    userListCategoryPicker(selection: $selectedCategory)
 	                }
 
 	                urlFooterMessage
@@ -1118,12 +1124,7 @@ struct AddFilterListView: View {
 	                        .textInputAutocapitalization(.words)
 	                    #endif
 
-	                Picker("Category", selection: $selectedCategory) {
-	                    ForEach(addableCategories) { category in
-	                        Text(category.localizedName).tag(category)
-	                    }
-	                }
-	                .pickerStyle(.menu)
+                    userListCategoryPicker(selection: $selectedCategory)
 		            } footer: {
 		                urlFooterMessage
 		            }
@@ -1133,16 +1134,17 @@ struct AddFilterListView: View {
 		    private var pasteTab: some View {
 		        Form {
 		            Section {
-		                TextField("Title", text: $userListTitle)
+		            TextField("Title", text: $userListTitle)
 		                    #if os(iOS)
-	                        .textInputAutocapitalization(.words)
-	                    #endif
-	                    .autocorrectionDisabled()
+		                .textInputAutocapitalization(.words)
+		            #endif
+		                    .autocorrectionDisabled()
 	                TextField("Description", text: $userListDescription)
 	                    #if os(iOS)
 	                        .textInputAutocapitalization(.sentences)
 	                    #endif
 	                    .autocorrectionDisabled()
+                userListCategoryPicker(selection: $selectedCategory)
 	            }
 
             Section("Rules") {
@@ -1155,19 +1157,20 @@ struct AddFilterListView: View {
 		    private var fileTab: some View {
 		        Form {
 		            Section {
-		                TextField("Title", text: $userListTitle)
+		            TextField("Title", text: $userListTitle)
 		                    #if os(iOS)
-	                        .textInputAutocapitalization(.words)
-	                    #endif
-	                    .autocorrectionDisabled()
+		                .textInputAutocapitalization(.words)
+		            #endif
+		                    .autocorrectionDisabled()
 	                TextField("Description", text: $userListDescription)
 	                    #if os(iOS)
 	                        .textInputAutocapitalization(.sentences)
-		                    #endif
-		                    .autocorrectionDisabled()
-		            }
+	                    #endif
+	                    .autocorrectionDisabled()
+                userListCategoryPicker(selection: $selectedCategory)
 		        }
 		    }
+    }
 
 	    // MARK: - Footer
 	    private var urlFooterMessage: some View {
@@ -1234,6 +1237,7 @@ struct AddFilterListView: View {
                     name: finalName,
                     description: finalDescription.isEmpty ? nil : finalDescription,
                     content: finalRules,
+                    category: selectedCategory,
                     isSelected: true
                 )
                 isSaving = false
@@ -1283,7 +1287,15 @@ struct AddFilterListView: View {
                         .textInputAutocapitalization(.sentences)
                     #endif
             }
-        }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Category")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                userListCategoryPicker(selection: $selectedCategory)
+            }
+    }
     }
 
     // MARK: - Helpers
@@ -1501,6 +1513,7 @@ struct EditUserListView: View {
 
     @State private var title: String
     @State private var description: String
+    @State private var selectedCategory: FilterListCategory
     @State private var rules: String = ""
     @State private var isLoadingContent: Bool = true
     @State private var errorMessage: String?
@@ -1510,6 +1523,7 @@ struct EditUserListView: View {
         self.filter = filter
         self._title = State(initialValue: filter.name)
         self._description = State(initialValue: filter.description == "User list." ? "" : filter.description)
+        self._selectedCategory = State(initialValue: filter.category)
     }
 
     var body: some View {
@@ -1526,6 +1540,8 @@ struct EditUserListView: View {
                             TextField("Description", text: $description)
                                 .textInputAutocapitalization(.sentences)
                                 .autocorrectionDisabled()
+
+                            userListCategoryPicker(selection: $selectedCategory)
                         } footer: {
                             if isDuplicateTitle {
                                 Text("That title is already used by another filter list.")
@@ -1603,6 +1619,12 @@ struct EditUserListView: View {
                                     .textFieldStyle(.roundedBorder)
                                     .autocorrectionDisabled()
 
+                                Text("Category")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+
+                                userListCategoryPicker(selection: $selectedCategory)
+
                                 Text(filter.url.absoluteString)
                                     .font(.caption2)
                                     .foregroundStyle(.tertiary)
@@ -1668,6 +1690,8 @@ struct EditUserListView: View {
         }
     }
 
+
+
     private var trimmedTitle: String {
         title.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -1730,6 +1754,7 @@ struct EditUserListView: View {
             id: filter.id,
             name: trimmedTitle,
             description: description,
+            category: selectedCategory,
             content: trimmedRules
         )
         if filterManager.hasError {

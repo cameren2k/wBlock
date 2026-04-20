@@ -142,16 +142,17 @@ enum BackupManager {
             let alreadyExists = filterManager.filterLists.contains(where: { $0.url.absoluteString == entry.url })
             guard !alreadyExists else { continue }
 
+            let category = FilterListCategory(rawValue: entry.category) ?? .custom
             let isInlineUserList = entry.url.hasPrefix("wblock://userlist/")
             if isInlineUserList, let content = entry.content {
                 filterManager.addUserList(
                     name: entry.name,
                     description: entry.description.isEmpty ? nil : entry.description,
                     content: content,
+                    category: category,
                     isSelected: entry.isSelected
                 )
             } else if !isInlineUserList {
-                let category = FilterListCategory(rawValue: entry.category) ?? .custom
                 filterManager.addFilterList(
                     name: entry.name,
                     urlString: entry.url,

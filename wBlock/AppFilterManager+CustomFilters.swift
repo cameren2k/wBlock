@@ -51,7 +51,7 @@ extension AppFilterManager {
         addCustomFilterList(newFilter)
     }
 
-    func addUserList(name: String, description: String? = nil, content: String, isSelected: Bool = true) {
+    func addUserList(name: String, description: String? = nil, content: String, category: FilterListCategory = .custom, isSelected: Bool = true) {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedDescription = description?.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -86,7 +86,7 @@ extension AppFilterManager {
             id: id,
             name: finalName,
             url: url,
-            category: .custom,
+            category: category,
             isCustom: true,
             isSelected: isSelected,
             description: trimmedDescription?.isEmpty == false
@@ -128,11 +128,23 @@ extension AppFilterManager {
         hasError = false
     }
 
-    func addUserListFromFile(_ fileURL: URL, nameOverride: String?, description: String? = nil, isSelected: Bool = true) {
+    func addUserListFromFile(
+        _ fileURL: URL,
+        nameOverride: String?,
+        description: String? = nil,
+        category: FilterListCategory = .custom,
+        isSelected: Bool = true
+    ) {
         do {
             let content = try String(contentsOf: fileURL, encoding: .utf8)
             let name = nameOverride?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            addUserList(name: name, description: description, content: content, isSelected: isSelected)
+            addUserList(
+                name: name,
+                description: description,
+                content: content,
+                category: category,
+                isSelected: isSelected
+            )
         } catch {
             statusDescription = LocalizedStrings.text("Failed to read file.", comment: "File read error")
             hasError = true
@@ -284,7 +296,7 @@ extension AppFilterManager {
         }
     }
 
-    func updateUserList(id: UUID, name: String, description: String, content: String) {
+    func updateUserList(id: UUID, name: String, description: String, category: FilterListCategory, content: String) {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedDescription = description.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -355,6 +367,7 @@ extension AppFilterManager {
 
         filterLists[index].name = trimmedName
         filterLists[index].description = trimmedDescription
+        filterLists[index].category = category
         filterLists[index].sourceRuleCount = Self.countRulesInUserListContent(trimmedContent)
 
         saveFilterListsCoalesced()

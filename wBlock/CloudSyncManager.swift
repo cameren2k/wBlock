@@ -651,6 +651,7 @@ final class CloudSyncManager: ObservableObject {
                 if deletedCustomURLs.contains(remoteCustom.url) {
                     continue
                 }
+                let remoteCategory = remoteCustom.resolvedCategory
                 if let inlineID = Self.inlineUserListID(from: remoteCustom.url) {
                     guard let content = remoteCustom.content else { continue }
                     Self.writeInlineUserListContent(id: inlineID, content: content)
@@ -684,6 +685,11 @@ final class CloudSyncManager: ObservableObject {
                             changed = true
                             nonSelectionChanged = true
                         }
+                        if filterManager.filterLists[existingIndex].category != remoteCategory {
+                            filterManager.filterLists[existingIndex].category = remoteCategory
+                            changed = true
+                            nonSelectionChanged = true
+                        }
                         if filterManager.filterLists[existingIndex].isSelected != remoteCustom.isSelected {
                             filterManager.filterLists[existingIndex].isSelected = remoteCustom.isSelected
                             changed = true
@@ -694,7 +700,7 @@ final class CloudSyncManager: ObservableObject {
                             id: Self.inlineUserListID(from: remoteCustom.url) ?? UUID(),
                             name: remoteCustom.name,
                             url: URL(string: remoteCustom.url) ?? URL(string: "https://example.com")!,
-                            category: .custom,
+                            category: remoteCategory,
                             isCustom: true,
                             isSelected: remoteCustom.isSelected,
                             description: remoteCustom.description ?? "User-added filter list.",
@@ -709,7 +715,7 @@ final class CloudSyncManager: ObservableObject {
                         id: Self.inlineUserListID(from: remoteCustom.url) ?? UUID(),
                         name: remoteCustom.name,
                         url: URL(string: remoteCustom.url) ?? URL(string: "https://example.com")!,
-                        category: .custom,
+                        category: remoteCategory,
                         isCustom: true,
                         isSelected: remoteCustom.isSelected,
                         description: remoteCustom.description ?? "User-added filter list.",
@@ -757,6 +763,7 @@ final class CloudSyncManager: ObservableObject {
         )
 
         for remoteCustom in filters.customLists where !deletedCustomURLs.contains(remoteCustom.url) {
+            let remoteCategory = remoteCustom.resolvedCategory
             if let inlineID = Self.inlineUserListID(from: remoteCustom.url) {
                 guard let content = remoteCustom.content else { continue }
                 Self.writeInlineUserListContent(id: inlineID, content: content)
@@ -770,6 +777,9 @@ final class CloudSyncManager: ObservableObject {
                 if let desc = remoteCustom.description, updated.description != desc {
                     updated.description = desc
                 }
+                if updated.category != remoteCategory {
+                    updated.category = remoteCategory
+                }
                 updated.isSelected = remoteCustom.isSelected
                 storedLists[existingIndex] = updated
             } else {
@@ -777,7 +787,7 @@ final class CloudSyncManager: ObservableObject {
                     id: Self.inlineUserListID(from: remoteCustom.url) ?? UUID(),
                     name: remoteCustom.name,
                     url: URL(string: remoteCustom.url) ?? URL(string: "https://example.com")!,
-                    category: .custom,
+                    category: remoteCategory,
                     isCustom: true,
                     isSelected: remoteCustom.isSelected,
                     description: remoteCustom.description ?? "User-added filter list.",
@@ -1069,6 +1079,7 @@ final class CloudSyncManager: ObservableObject {
                     if filterManager.filterLists.contains(where: { $0.isCustom && $0.url.absoluteString == remoteCustom.url }) {
                         continue
                     }
+                    let remoteCategory = remoteCustom.resolvedCategory
                     if let inlineID = Self.inlineUserListID(from: remoteCustom.url) {
                         guard let content = remoteCustom.content else { continue }
                         Self.writeInlineUserListContent(id: inlineID, content: content)
@@ -1077,7 +1088,7 @@ final class CloudSyncManager: ObservableObject {
                         id: Self.inlineUserListID(from: remoteCustom.url) ?? UUID(),
                         name: remoteCustom.name,
                         url: URL(string: remoteCustom.url) ?? URL(string: "https://example.com")!,
-                        category: .custom,
+                        category: remoteCategory,
                         isCustom: true,
                         isSelected: remoteCustom.isSelected,
                         description: remoteCustom.description ?? "User-added filter list.",
@@ -1094,6 +1105,7 @@ final class CloudSyncManager: ObservableObject {
                 var storedLists = dataManager.getFilterLists()
                 let existingCustomURLs = Set(storedLists.filter(\.isCustom).map { $0.url.absoluteString })
                 for remoteCustom in missingCustoms where !existingCustomURLs.contains(remoteCustom.url) {
+                    let remoteCategory = remoteCustom.resolvedCategory
                     if let inlineID = Self.inlineUserListID(from: remoteCustom.url) {
                         guard let content = remoteCustom.content else { continue }
                         Self.writeInlineUserListContent(id: inlineID, content: content)
@@ -1102,10 +1114,10 @@ final class CloudSyncManager: ObservableObject {
                         id: Self.inlineUserListID(from: remoteCustom.url) ?? UUID(),
                         name: remoteCustom.name,
                         url: URL(string: remoteCustom.url) ?? URL(string: "https://example.com")!,
-                        category: .custom,
+                        category: remoteCategory,
                         isCustom: true,
                         isSelected: remoteCustom.isSelected,
-                        description: "User-added filter list.",
+                        description: remoteCustom.description ?? "User-added filter list.",
                         sourceRuleCount: nil
                     )
                     storedLists.append(newFilter)
@@ -1197,6 +1209,7 @@ final class CloudSyncManager: ObservableObject {
                     url: list.url.absoluteString,
                     name: list.name,
                     description: list.description.isEmpty ? nil : list.description,
+                    category: list.category.rawValue,
                     isSelected: list.isSelected,
                     content: Self.readInlineUserListContentIfNeeded(urlString: list.url.absoluteString)
                 )
@@ -1704,6 +1717,7 @@ private struct SyncPayload: Codable {
         let url: String
         let name: String
         let description: String?
+        let category: String?
         let isSelected: Bool
         /// Inline user list content (for wblock://userlist/<uuid> lists). Nil for URL-hosted lists.
         let content: String?
@@ -1753,4 +1767,10 @@ private struct SyncPayload: Codable {
     let userScripts: UserScripts
     let whitelistDomains: [String]
     let zapperRules: [String: [String]]?
+}
+
+private extension SyncPayload.CustomFilterList {
+    var resolvedCategory: FilterListCategory {
+        FilterListCategory(rawValue: category ?? "") ?? .custom
+    }
 }
