@@ -70,6 +70,12 @@ public enum WebExtensionRequestHandler {
             case "getUserScriptResourceChunk":
                 handleUserScriptChunkRequest(message: message!, context: context, kind: .resource)
                 return
+            case "setUserScriptStorageValue":
+                handleSetUserScriptStorageValue(message: message!, context: context)
+                return
+            case "deleteUserScriptStorageValue":
+                handleDeleteUserScriptStorageValue(message: message!, context: context)
+                return
             case "getSiteDisabledState":
                 handleGetSiteDisabledState(message: message!, context: context)
                 return
@@ -494,14 +500,19 @@ public enum WebExtensionRequestHandler {
             let userScriptManager = UserScriptManager.shared
             let userScripts = userScriptManager.getEnabledUserScriptsForURL(urlString)
 
-            let userScriptDescriptors: [[String: Any]] = userScripts.map { script in
+            var userScriptDescriptors: [[String: Any]] = []
+            userScriptDescriptors.reserveCapacity(userScripts.count)
+
+            for script in userScripts {
                 // Prefer cached resource names, but fall back to parsing metadata so scripts
                 // installed before resource caching still request the right dependencies.
                 let resourceNames =
                     !script.resourceContents.isEmpty
                     ? Array(script.resourceContents.keys).sorted()
                     : UserScriptMetadataParser.extractResourceNames(from: script.content)
-                return [
+                let storageSnapshot = await UserScriptStorageManager.shared.snapshot(for: script.id.uuidString)
+
+                userScriptDescriptors.append([
                     "id": script.id.uuidString,
                     "name": script.name,
                     "version": script.version,
@@ -509,11 +520,49 @@ public enum WebExtensionRequestHandler {
                     "runAt": script.runAt,
                     "noframes": script.noframes,
                     "injectInto": script.injectInto,
-                    "resourceNames": resourceNames
-                ]
+                    "resourceNames": resourceNames,
+                    "storageSnapshot": storageSnapshot
+                ])
             }
 
             let response = createResponse(with: ["userScripts": userScriptDescriptors])
+            context.completeRequest(returningItems: [response])
+        }
+    }
+
+    private static func handleSetUserScriptStorageValue(message: [String: Any?], context: NSExtensionContext) {
+        guard let scriptID = message["scriptId"] as? String,
+              let key = message["key"] as? String,
+              let rawValue = message["rawValue"] as? String
+        else {
+            let response = createResponse(with: ["ok": false, "error": "Missing userscript storage payload"])
+            context.completeRequest(returningItems: [response])
+            return
+        }
+
+        Task {
+            let result = await UserScriptStorageManager.shared.setSerializedValue(rawValue, forKey: key, scriptID: scriptID)
+            let response = createResponse(with: result.ok
+                ? ["ok": true]
+                : ["ok": false, "error": result.error ?? "Failed to persist userscript storage"] )
+            context.completeRequest(returningItems: [response])
+        }
+    }
+
+    private static func handleDeleteUserScriptStorageValue(message: [String: Any?], context: NSExtensionContext) {
+        guard let scriptID = message["scriptId"] as? String,
+              let key = message["key"] as? String
+        else {
+            let response = createResponse(with: ["ok": false, "error": "Missing userscript storage payload"])
+            context.completeRequest(returningItems: [response])
+            return
+        }
+
+        Task {
+            let result = await UserScriptStorageManager.shared.deleteValue(forKey: key, scriptID: scriptID)
+            let response = createResponse(with: result.ok
+                ? ["ok": true]
+                : ["ok": false, "error": result.error ?? "Failed to persist userscript storage"] )
             context.completeRequest(returningItems: [response])
         }
     }

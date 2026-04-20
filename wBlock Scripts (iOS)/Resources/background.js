@@ -20476,6 +20476,26 @@ function _toPrimitive(t, r) { if ("object" != typeof t || !t) return t; var e = 
         return { userScripts: [] };
       }
     }
+    if (message && (message.action === "setUserScriptStorageValue" || message.action === "deleteUserScriptStorageValue")) {
+      const storageRequest = {
+        action: message.action,
+        requestId: "userscript-storage-" + Date.now(),
+        scriptId: message.scriptId,
+        key: message.key,
+        rawValue: message.rawValue
+      };
+
+      try {
+        const response = await browser.runtime.sendNativeMessage("application.id", storageRequest);
+        if (!response || typeof response.ok !== "boolean") {
+          return { ok: false, error: "Empty response from native host" };
+        }
+        return response;
+      } catch (error) {
+        console.error("[wBlock] Failed to update userscript storage:", error);
+        return { ok: false, error: String(error && error.message ? error.message : error) };
+      }
+    }
     if (message && message.action === "gmXmlhttpRequest") {
       try {
         const fetchOptions = {

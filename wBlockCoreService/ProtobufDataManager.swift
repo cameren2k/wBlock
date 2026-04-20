@@ -1212,6 +1212,11 @@ public class ProtobufDataManager: ObservableObject {
         lastSavedData = nil
         lastLoadedDataFileModificationDate = nil
         lastLoadedDataVersion = 0
+        let storageResetResult = await UserScriptStorageManager.shared.reset()
+        if !storageResetResult.ok {
+            let storageResetError = storageResetResult.error ?? "unknown error"
+            logger.error("⚠️ Failed to reset userscript storage during reset: \(storageResetError)")
+        }
         await createDefaultData()
     }
 

@@ -89,6 +89,7 @@ if (window.wBlockUserscriptInjectorHasRun) {
             this.pendingScripts = []; // Scripts waiting for document to be ready
             this.messageListenerAttached = false; // Ensure listener is attached only once
             this.pendingNativeRequests = new Map(); // requestId -> { resolve, reject, timeoutId }
+            this.storageBridgeScriptIDs = new Map(); // bridgeId -> scriptId
             wBlockLog('[wBlock] UserScriptEngine constructor called.');
             this.init();
         }
@@ -100,6 +101,9 @@ if (window.wBlockUserscriptInjectorHasRun) {
             // On Safari App Extensions, responses can arrive very quickly and be missed
             // if the listener isn't attached yet.
             this.setupMessageListener();
+
+            // Bridge page-context GM storage writes through the extension/native layer.
+            this.setupStorageBridge();
 
             // Bridge for GM_xmlhttpRequest: page-context scripts post messages here,
             // and we forward them through the background/native layer (CORS-free).
@@ -132,6 +136,52 @@ if (window.wBlockUserscriptInjectorHasRun) {
                             id: id,
                             success: false,
                             error: error.message || String(error)
+                        }, '*');
+                    });
+            });
+        }
+
+        setupStorageBridge() {
+            window.addEventListener('message', (event) => {
+                if (event.source !== window) return;
+                const data = event.data;
+                if (!data || (data.type !== 'wblock-gm-storage-set' && data.type !== 'wblock-gm-storage-delete')) return;
+                if (typeof data.bridgeId !== 'string' || typeof data.key !== 'string' || typeof data.requestId !== 'string') return;
+                if (data.type === 'wblock-gm-storage-set' && typeof data.rawValue !== 'string') return;
+
+                const scriptId = this.storageBridgeScriptIDs.get(data.bridgeId);
+                if (!scriptId) return;
+
+                const action = data.type === 'wblock-gm-storage-set'
+                    ? 'setUserScriptStorageValue'
+                    : 'deleteUserScriptStorageValue';
+                const payload = {
+                    scriptId: scriptId,
+                    key: data.key
+                };
+
+                if (action === 'setUserScriptStorageValue') {
+                    payload.rawValue = data.rawValue;
+                }
+
+                this.sendNativeRequest(action, payload)
+                    .then((result) => {
+                        const ok = !!result && result.ok !== false;
+                        window.postMessage({
+                            type: 'wblock-gm-storage-result',
+                            requestId: data.requestId,
+                            success: ok,
+                            error: ok ? undefined : ((result && result.error) || 'Failed to persist GM storage change')
+                        }, '*');
+                    })
+                    .catch((error) => {
+                        const errorMessage = error && error.message ? error.message : String(error);
+                        wBlockWarn('[wBlock] Failed to persist GM storage change:', errorMessage);
+                        window.postMessage({
+                            type: 'wblock-gm-storage-result',
+                            requestId: data.requestId,
+                            success: false,
+                            error: errorMessage
                         }, '*');
                     });
             });
@@ -443,6 +493,10 @@ if (window.wBlockUserscriptInjectorHasRun) {
             this.injectingScripts.add(script.name);
             try {
                 const fullScript = await this.ensureScriptPayload(script);
+                if (fullScript.id && !fullScript.storageBridgeId) {
+                    fullScript.storageBridgeId = this.generateRequestId('gmstorage');
+                    this.storageBridgeScriptIDs.set(fullScript.storageBridgeId, fullScript.id);
+                }
 
                 const injectInto = fullScript.injectInto || 'page';
                 wBlockLog(`[wBlock] Injecting userscript: ${fullScript.name} (mode: ${injectInto})`);
@@ -483,6 +537,7 @@ if (window.wBlockUserscriptInjectorHasRun) {
                 scriptElement.nonce = nonce;
             }
             (document.head || document.documentElement).appendChild(scriptElement);
+            scriptElement.remove();
             wBlockLog(`[wBlock] Injected ${script.name} in page context via <script> tag`);
         }
 
@@ -565,8 +620,9 @@ if (window.wBlockUserscriptInjectorHasRun) {
         }
 
         wrapUserScript(script, context = 'page') {
-            // Serialize resources as a JSON string for injection
+            // Serialize resources and shared storage state for injection
             const resourcesJSON = script.resources ? JSON.stringify(script.resources) : '{}';
+            const storageSnapshotJSON = script.storageSnapshot ? JSON.stringify(script.storageSnapshot) : '{}';
             const isContentContext = context === 'content';
 
             // In content context, unsafeWindow is just the content script's window (no page JS access)
@@ -622,7 +678,10 @@ if (window.wBlockUserscriptInjectorHasRun) {
 
     // Storage change listeners registry
     const storageListeners = new Map(); // key -> Map(listenerId, callback)
+    const pendingStorageRequests = new Map(); // requestId -> { onFailure, timeoutId }
     let listenerIdCounter = 0;
+    const storageBridgeId = '${escapeForJS(script.storageBridgeId || '')}';
+    const scriptStorageState = Object.assign({}, ${storageSnapshotJSON});
 
     const parseStoredValue = (rawValue) => {
         if (rawValue === null || typeof rawValue === 'undefined') {
@@ -634,6 +693,11 @@ if (window.wBlockUserscriptInjectorHasRun) {
             wBlockWarn('[wBlock] Failed to parse stored GM value, returning raw string:', error);
             return rawValue;
         }
+    };
+
+    const serializeStoredValue = (value) => {
+        const serialized = JSON.stringify(value);
+        return typeof serialized === 'undefined' ? 'undefined' : serialized;
     };
 
     const notifyStorageListeners = (key, oldValue, newValue, remote) => {
@@ -649,6 +713,91 @@ if (window.wBlockUserscriptInjectorHasRun) {
                 wBlockError('[wBlock] Storage listener error:', error);
             }
         });
+    };
+
+    ${isContentContext ? `` : `
+    window.addEventListener('message', (event) => {
+        if (event.source !== window) return;
+        const data = event.data;
+        if (!data || data.type !== 'wblock-gm-storage-result' || typeof data.requestId !== 'string') return;
+
+        const pending = pendingStorageRequests.get(data.requestId);
+        if (!pending) return;
+        pendingStorageRequests.delete(data.requestId);
+        clearTimeout(pending.timeoutId);
+
+        if (data.success === false && typeof pending.onFailure === 'function') {
+            pending.onFailure(data.error || 'Failed to persist GM storage change');
+        }
+    });
+    `}
+
+    const persistStorageChange = (kind, key, rawValue, onFailure) => {
+        if (!key) {
+            if (typeof onFailure === 'function') {
+                onFailure('Missing GM storage key');
+            }
+            return;
+        }
+
+        ${isContentContext ? `
+        const message = {
+            action: kind === 'set' ? 'setUserScriptStorageValue' : 'deleteUserScriptStorageValue',
+            scriptId: '${escapeForJS(script.id || '')}',
+            key: key
+        };
+        if (kind === 'set') {
+            message.rawValue = rawValue;
+        }
+
+        if (typeof browser !== 'undefined' && browser.runtime && browser.runtime.sendMessage) {
+            browser.runtime.sendMessage(message)
+                .then((result) => {
+                    if ((!result || result.ok === false) && typeof onFailure === 'function') {
+                        onFailure((result && result.error) || 'Failed to persist GM storage change');
+                    }
+                })
+                .catch((error) => {
+                    if (typeof onFailure === 'function') {
+                        onFailure(error && error.message ? error.message : String(error));
+                    }
+                });
+            return;
+        }
+
+        if (typeof onFailure === 'function') {
+            onFailure('No messaging API available for GM storage persistence');
+        }
+        ` : `
+        if (!storageBridgeId) {
+            if (typeof onFailure === 'function') {
+                onFailure('Missing GM storage bridge identifier');
+            }
+            return;
+        }
+
+        const requestId = 'gmstorage-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+        if (typeof onFailure === 'function') {
+            const timeoutId = setTimeout(() => {
+                const pending = pendingStorageRequests.get(requestId);
+                if (!pending) return;
+                pendingStorageRequests.delete(requestId);
+                pending.onFailure('GM storage persistence timed out');
+            }, 15000);
+            pendingStorageRequests.set(requestId, { onFailure, timeoutId });
+        }
+
+        const message = {
+            type: kind === 'set' ? 'wblock-gm-storage-set' : 'wblock-gm-storage-delete',
+            bridgeId: storageBridgeId,
+            key: key,
+            requestId: requestId
+        };
+        if (kind === 'set') {
+            message.rawValue = rawValue;
+        }
+        window.postMessage(message, '*');
+        `}
     };
 
     const inferResourceMimeType = (resourceName, resourceValue) => {
@@ -746,13 +895,6 @@ if (window.wBlockUserscriptInjectorHasRun) {
         return 'data:' + mimeType + ';charset=utf-8,' + encodeURIComponent(resourceValue);
     };
 
-    // Listen for storage events from other tabs/windows
-    window.addEventListener('storage', (e) => {
-        if (e.key && e.key.startsWith('wblock_gm_')) {
-            const actualKey = e.key.substring('wblock_gm_'.length);
-            notifyStorageListeners(actualKey, parseStoredValue(e.oldValue), parseStoredValue(e.newValue), true);
-        }
-    });
 
     ${unsafeWindowCode}
 
@@ -769,11 +911,13 @@ if (window.wBlockUserscriptInjectorHasRun) {
         },
         log: function(...args) { wBlockLog('[UserScript:${escapeForJS(script.name)}]', ...args); },
 
-        // Greasemonkey API implementations using localStorage
+        // Greasemonkey API implementations backed by shared per-userscript storage
         getValue: function(key, defaultValue) {
             try {
-                const stored = localStorage.getItem('wblock_gm_' + key);
-                return stored !== null ? parseStoredValue(stored) : defaultValue;
+                if (Object.prototype.hasOwnProperty.call(scriptStorageState, key)) {
+                    return parseStoredValue(scriptStorageState[key]);
+                }
+                return defaultValue;
             } catch (e) {
                 wBlockWarn('[wBlock] Failed to get value for key:', key, e);
                 return defaultValue;
@@ -782,10 +926,21 @@ if (window.wBlockUserscriptInjectorHasRun) {
 
         setValue: function(key, value) {
             try {
-                const storageKey = 'wblock_gm_' + key;
-                const oldValue = parseStoredValue(localStorage.getItem(storageKey));
-                localStorage.setItem(storageKey, JSON.stringify(value));
+                const hadValue = Object.prototype.hasOwnProperty.call(scriptStorageState, key);
+                const previousRawValue = hadValue ? scriptStorageState[key] : undefined;
+                const oldValue = hadValue ? parseStoredValue(previousRawValue) : undefined;
+                const rawValue = serializeStoredValue(value);
+                scriptStorageState[key] = rawValue;
                 notifyStorageListeners(key, oldValue, value, false);
+                persistStorageChange('set', key, rawValue, (error) => {
+                    if (hadValue) {
+                        scriptStorageState[key] = previousRawValue;
+                    } else {
+                        delete scriptStorageState[key];
+                    }
+                    wBlockWarn('[wBlock] Failed to persist value for key:', key, error);
+                    notifyStorageListeners(key, value, oldValue, true);
+                });
             } catch (e) {
                 wBlockWarn('[wBlock] Failed to save value for key:', key, e);
             }
@@ -793,10 +948,18 @@ if (window.wBlockUserscriptInjectorHasRun) {
 
         deleteValue: function(key) {
             try {
-                const storageKey = 'wblock_gm_' + key;
-                const oldValue = parseStoredValue(localStorage.getItem(storageKey));
-                localStorage.removeItem(storageKey);
+                if (!Object.prototype.hasOwnProperty.call(scriptStorageState, key)) {
+                    return;
+                }
+                const previousRawValue = scriptStorageState[key];
+                const oldValue = parseStoredValue(previousRawValue);
+                delete scriptStorageState[key];
                 notifyStorageListeners(key, oldValue, undefined, false);
+                persistStorageChange('delete', key, undefined, (error) => {
+                    scriptStorageState[key] = previousRawValue;
+                    wBlockWarn('[wBlock] Failed to delete value for key:', key, error);
+                    notifyStorageListeners(key, undefined, oldValue, true);
+                });
             } catch (e) {
                 wBlockWarn('[wBlock] Failed to delete value for key:', key, e);
             }
@@ -804,15 +967,7 @@ if (window.wBlockUserscriptInjectorHasRun) {
 
         listValues: function() {
             try {
-                const keys = [];
-                const prefix = 'wblock_gm_';
-                for (let i = 0; i < localStorage.length; i++) {
-                    const key = localStorage.key(i);
-                    if (key && key.startsWith(prefix)) {
-                        keys.push(key.substring(prefix.length));
-                    }
-                }
-                return keys;
+                return Object.keys(scriptStorageState);
             } catch (e) {
                 wBlockWarn('[wBlock] Failed to list values:', e);
                 return [];
@@ -1141,11 +1296,11 @@ if (window.wBlockUserscriptInjectorHasRun) {
     const GM_registerMenuCommand = GM.registerMenuCommand;
     const GM_unregisterMenuCommand = GM.unregisterMenuCommand;
 
-    // Make sure unsafeWindow is defined at the global scope first
+    ${isContentContext ? `
+    // Expose GM globals only inside the isolated content context.
     window.unsafeWindow = unsafeWindow;
-
     window.GM_info = GM_info;
-    window.GM = GM; // Expose the GM object
+    window.GM = GM;
 
     // Legacy GM function aliases
     window.GM_getValue = GM_getValue;
@@ -1166,6 +1321,7 @@ if (window.wBlockUserscriptInjectorHasRun) {
     window.GM_xmlhttpRequest = GM_xmlhttpRequest;
     window.GM_registerMenuCommand = GM_registerMenuCommand;
     window.GM_unregisterMenuCommand = GM_unregisterMenuCommand;
+    ` : ``}
 
     try {
         ${script.content}
