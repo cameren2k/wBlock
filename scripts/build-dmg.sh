@@ -168,6 +168,31 @@ if [[ -n "${SIGNING_IDENTITY}" ]]; then
     done < <(find "${APP_PATH}/Contents/PlugIns" -maxdepth 1 -name "*.appex" -print0)
   fi
 
+  # Sign embedded helper executables that live inside the app bundle but are
+  # not the main app executable itself.
+  main_executable_name="$(basename "${APP_PATH}" .app)"
+  if [[ -d "${APP_PATH}/Contents/MacOS" ]]; then
+    while IFS= read -r -d '' helper; do
+      helper_name="$(basename "${helper}")"
+      if [[ "${helper_name}" == "${main_executable_name}" ]]; then
+        continue
+      fi
+
+      entitlements=""
+      case "${helper_name}" in
+        "FilterUpdateAgent") entitlements="${ROOT_DIR}/FilterUpdateAgent/FilterUpdateAgent.entitlements" ;;
+      esac
+
+      if [[ -n "${entitlements}" && -f "${entitlements}" ]]; then
+        modified_ent="$(prepare_entitlements "${entitlements}")"
+        sign_item "${helper}" "${modified_ent}"
+        rm -f "${modified_ent}"
+      else
+        sign_item "${helper}"
+      fi
+    done < <(find "${APP_PATH}/Contents/MacOS" -maxdepth 1 -type f -perm -111 -print0)
+  fi
+
   # Sign the main app last (outermost)
   # Use the direct-distribution entitlements which strip restricted
   # entitlements (iCloud, push notifications) that require an embedded
