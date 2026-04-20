@@ -20504,8 +20504,8 @@ function _toPrimitive(t, r) { if ("object" != typeof t || !t) return t; var e = 
     }
     if (message && message.action === "wblock:menu:getCommands") {
       const tabId = typeof message.tabId === "number" ? message.tabId : (((_sender$tab = sender.tab) === null || _sender$tab === void 0 ? void 0 : _sender$tab.id) ?? 0);
-      await refreshTabMenuCommands(tabId);
-      return { ok: true, commands: getTabMenuCommands(tabId) };
+      const liveCommands = await queryLiveTabMenuCommands(tabId);
+      return { ok: true, commands: Array.isArray(liveCommands) ? liveCommands : getTabMenuCommands(tabId) };
     }
     if (message && message.action === "wblock:menu:invokeCommand") {
       const tabId = typeof message.tabId === "number" ? message.tabId : (((_sender$tab = sender.tab) === null || _sender$tab === void 0 ? void 0 : _sender$tab.id) ?? 0);
@@ -20666,18 +20666,39 @@ function _toPrimitive(t, r) { if ("object" != typeof t || !t) return t; var e = 
     });
     return commands;
   };
-  const refreshTabMenuCommands = async tabId => {
-    if (!canObserveTabs || !browser.tabs.sendMessage || typeof tabId !== "number" || !tabId) {
-      return;
+  const queryLiveTabMenuCommands = async tabId => {
+    if (!browser.scripting || !browser.scripting.executeScript || typeof tabId !== "number" || !tabId) {
+      return null;
     }
     try {
-      await browser.tabs.sendMessage(tabId, {
-        type: "wblock:menu:syncState"
+      const executionResults = await browser.scripting.executeScript({
+        target: {
+          tabId,
+          allFrames: true
+        },
+        func: () => Array.isArray(window.__wBlockUserscriptMenuState) ? window.__wBlockUserscriptMenuState : []
       });
-    } catch (_unused) {}
-    await new Promise(resolve => {
-      setTimeout(resolve, 30);
-    });
+      const frameCommands = new Map();
+      for (const executionResult of executionResults || []) {
+        const frameId = typeof executionResult.frameId === "number" ? executionResult.frameId : 0;
+        const normalized = normalizeMenuCommands(executionResult.result).map(command => ({
+          ...command,
+          frameId
+        }));
+        if (normalized.length > 0) {
+          frameCommands.set(frameId, normalized);
+        }
+      }
+      if (frameCommands.size === 0) {
+        menuCommandsByTab.delete(tabId);
+      } else {
+        menuCommandsByTab.set(tabId, frameCommands);
+      }
+      return getTabMenuCommands(tabId);
+    } catch (error) {
+      console.warn("[wBlock] Failed to query live menu commands:", error);
+      return null;
+    }
   };
   const normalizeDiagnosticFields = fields => {
     const entries = Object.entries(fields).filter(([, value]) => value !== undefined && value !== null && value !== "");

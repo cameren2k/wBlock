@@ -220,11 +220,13 @@ if (window.wBlockUserscriptInjectorHasRun) {
                     this.unregisterMenuCommandDescriptor(bridgeId, commandId);
                 }
             };
+            window.__wBlockUserscriptMenuState = this.getRegisteredMenuCommands();
 
             window.addEventListener('pagehide', () => {
                 this.pageMenuBridgeElements.clear();
                 this.contentMenuCommandCallbacks.clear();
                 this.registeredMenuCommands.clear();
+                window.__wBlockUserscriptMenuState = [];
                 this.syncMenuCommandsToBackground();
             }, { once: true });
         }
@@ -267,13 +269,16 @@ if (window.wBlockUserscriptInjectorHasRun) {
         }
 
         syncMenuCommandsToBackground() {
+            const commands = this.getRegisteredMenuCommands();
+            window.__wBlockUserscriptMenuState = commands;
+
             if (!(typeof browser !== 'undefined' && browser.runtime && browser.runtime.sendMessage)) {
                 return;
             }
 
             browser.runtime.sendMessage({
                 action: 'wblock:menu:updateFrameCommands',
-                commands: this.getRegisteredMenuCommands()
+                commands
             }).catch((error) => {
                 wBlockWarn('[wBlock] Failed to sync menu commands to background:', error);
             });
