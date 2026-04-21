@@ -541,7 +541,9 @@ extension SettingsView {
         panel.begin { response in
             guard response == .OK, let url = panel.url else { return }
             do {
-                try data.write(to: url, options: .atomic)
+                try url.withSecurityScopedAccess { accessibleURL in
+                    try data.write(to: accessibleURL, options: .atomic)
+                }
             } catch {
                 backupStatusMessage = String.localizedStringWithFormat(
                     NSLocalizedString("Export failed: %@", comment: "Backup export failure"),

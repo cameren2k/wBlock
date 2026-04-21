@@ -284,7 +284,9 @@ struct LogsView: View {
             Task {
                 let logsText = await ConcurrentLogManager.shared.exportAsText()
                 do {
-                    try logsText.write(to: url, atomically: true, encoding: .utf8)
+                    try url.withSecurityScopedAccess { accessibleURL in
+                        try logsText.write(to: accessibleURL, atomically: true, encoding: .utf8)
+                    }
                 } catch {
                     await ConcurrentLogManager.shared.error(.system, "Failed to export logs", metadata: ["error": "\(error)"])
                 }
