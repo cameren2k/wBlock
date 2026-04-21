@@ -514,6 +514,10 @@ public enum WebExtensionRequestHandler {
                     ? Array(script.resourceContents.keys).sorted()
                     : UserScriptMetadataParser.extractResourceNames(from: script.content)
                 let storageSnapshot = await UserScriptStorageManager.shared.snapshot(for: script.id.uuidString)
+                let hasUnsafeWindowGrant = script.grant.contains {
+                    $0.caseInsensitiveCompare("unsafeWindow") == .orderedSame
+                }
+                let injectInto = (script.injectInto == "auto" && hasUnsafeWindowGrant) ? "page" : script.injectInto
 
                 userScriptDescriptors.append([
                     "id": script.id.uuidString,
@@ -522,7 +526,7 @@ public enum WebExtensionRequestHandler {
                     "description": script.description,
                     "runAt": script.runAt,
                     "noframes": script.noframes,
-                    "injectInto": script.injectInto,
+                    "injectInto": injectInto,
                     "resourceNames": resourceNames,
                     "storageSnapshot": storageSnapshot
                 ])
