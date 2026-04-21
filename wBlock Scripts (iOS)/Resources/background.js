@@ -20513,9 +20513,11 @@ function _toPrimitive(t, r) { if ("object" != typeof t || !t) return t; var e = 
         action: message.action,
         requestId: "userscript-storage-" + Date.now(),
         scriptId: message.scriptId,
-        key: message.key,
-        rawValue: message.rawValue
+        key: message.key
       };
+      if (typeof message.rawValue === "string") {
+        storageRequest.rawValue = message.rawValue;
+      }
 
       try {
         const response = await browser.runtime.sendNativeMessage("application.id", storageRequest);
@@ -20609,9 +20611,11 @@ function _toPrimitive(t, r) { if ("object" != typeof t || !t) return t; var e = 
         requestId: "userscript-chunk-" + Date.now(),
         scriptId: message.scriptId,
         chunkIndex: message.chunkIndex,
-        chunkSize: message.chunkSize,
-        resourceName: message.resourceName
+        chunkSize: message.chunkSize
       };
+      if (typeof message.resourceName === "string" && message.resourceName.length > 0) {
+        chunkRequest.resourceName = message.resourceName;
+      }
 
       try {
         const response = await browser.runtime.sendNativeMessage("application.id", chunkRequest);
