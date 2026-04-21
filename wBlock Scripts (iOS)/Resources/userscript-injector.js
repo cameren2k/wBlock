@@ -1173,40 +1173,30 @@ if (window.wBlockUserscriptInjectorHasRun) {
 
         try {
             if (match[2]) {
-        registerMenuCommand: function(caption, callback, accessKey) {
-            wBlockLog('[wBlock] GM.registerMenuCommand called:', caption);
-            if (typeof callback !== 'function') {
-                wBlockWarn('[wBlock] Ignoring GM.registerMenuCommand with non-function callback:', caption);
-                return null;
+                const binary = atob(match[3] || '');
+                const bytes = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i++) {
+                    bytes[i] = binary.charCodeAt(i);
+                }
+                return new TextDecoder('utf-8').decode(bytes);
             }
+            return decodeURIComponent(match[3] || '');
+        } catch (error) {
+            wBlockWarn('[wBlock] Failed to decode data URL resource text:', error);
+            return undefined;
+        }
+    };
 
-            const menuCommandId = 'menu-' + (++listenerIdCounter);
-            const normalizedCaption = typeof caption === 'string' ? caption : String(caption ?? '');
-            const options = normalizeMenuCommandOptions(accessKey);
-            menuCommandCallbacks.set(menuCommandId, callback);
-            publishMenuCommand('register', menuCommandId, {
-                caption: normalizedCaption,
-                title: options.title,
-                accessKey: options.accessKey
-            }, callback);
-            return menuCommandId;
-        },
+    const resolveResourceValue = (resourceName) => {
+        if (!scriptResources || !Object.prototype.hasOwnProperty.call(scriptResources, resourceName)) {
+            return undefined;
+        }
+        return scriptResources[resourceName];
+    };
 
-        unregisterMenuCommand: function(menuCommandId) {
-            wBlockLog('[wBlock] GM.unregisterMenuCommand called:', menuCommandId);
-            if (!menuCommandCallbacks.has(menuCommandId)) {
-                return;
-            }
-            menuCommandCallbacks.delete(menuCommandId);
-            publishMenuCommand('unregister', menuCommandId, {}, null);
-        },
-
-        getResourceURL: function(resourceName) {
-            const resolvedURL = makeResourceURL(resourceName);
-            if (resolvedURL) {
-                return resolvedURL;
-            }
-            wBlockWarn('[wBlock] Resource URL not found:', resourceName);
+    const makeResourceURL = (resourceName) => {
+        const resourceValue = resolveResourceValue(resourceName);
+        if (typeof resourceValue !== 'string' || resourceValue.length === 0) {
             return undefined;
         }
 
@@ -1217,7 +1207,6 @@ if (window.wBlockUserscriptInjectorHasRun) {
         const mimeType = inferResourceMimeType(resourceName, resourceValue);
         return 'data:' + mimeType + ';charset=utf-8,' + encodeURIComponent(resourceValue);
     };
-
 
     ${unsafeWindowCode}
 
@@ -1395,7 +1384,7 @@ if (window.wBlockUserscriptInjectorHasRun) {
                 caption: normalizedCaption,
                 title: options.title,
                 accessKey: options.accessKey
-            });
+            }, callback);
             return menuCommandId;
         },
 
@@ -1405,7 +1394,7 @@ if (window.wBlockUserscriptInjectorHasRun) {
                 return;
             }
             menuCommandCallbacks.delete(menuCommandId);
-            publishMenuCommand('unregister', menuCommandId, {});
+            publishMenuCommand('unregister', menuCommandId, {}, null);
         },
 
         addStyle: function(css) {
