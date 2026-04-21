@@ -452,9 +452,10 @@ if (window.wBlockUserscriptInjectorHasRun) {
         }
 
         getPreferredChunkSize() {
-            // Safari App Extensions can have smaller message size limits than WebExtensions.
-            const isSafariAppExtension = typeof safari !== 'undefined' && safari.extension && safari.extension.dispatchMessage;
-            return isSafariAppExtension ? (32 * 1024) : (256 * 1024); // bytes (before base64)
+            // Safari's WebExtension/native messaging bridge has tighter payload limits
+            // than Chromium-style environments. Keep chunks small for both the
+            // browser.runtime and Safari App Extension code paths.
+            return 32 * 1024; // bytes, before base64 expansion
         }
 
         base64ToBytes(base64) {
