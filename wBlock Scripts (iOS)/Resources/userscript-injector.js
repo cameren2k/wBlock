@@ -861,11 +861,12 @@ if (window.wBlockUserscriptInjectorHasRun) {
         }
     })();`;
 
+            const strictModeDirective = isContentContext ? "'use strict';" : '';
+
             return `
 // wBlock Userscript Wrapper for: ${escapeForJS(script.name)} (${context} context)
 (function() {
-    'use strict';
-
+    ${strictModeDirective}
     // Debug logging helpers - defined in wrapper scope to be available in injected context
     const WBLOCK_DEBUG_LOGGING = ${WBLOCK_DEBUG_LOGGING};
 
