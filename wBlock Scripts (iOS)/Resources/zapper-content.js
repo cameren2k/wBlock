@@ -1180,15 +1180,15 @@
     }
     if (message.type === 'wblock:zapper:activate') {
       activateZapper();
-      return;
+      return Promise.resolve({ ok: true, handledBy: 'zapper-content' });
     }
     if (message.type === 'wblock:zapper:deactivate') {
       deactivateZapper({ removeUi: true });
-      return;
+      return Promise.resolve({ ok: true, handledBy: 'zapper-content' });
     }
     if (message.type === 'wblock:zapper:reloadRules') {
       reloadRulesAndApply().catch(() => {});
-      return;
+      return Promise.resolve({ ok: true, handledBy: 'zapper-content' });
     }
   });
 

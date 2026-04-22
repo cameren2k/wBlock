@@ -586,6 +586,15 @@ if (window.wBlockUserscriptInjectorHasRun) {
                 browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     wBlockLog('[wBlock] Received message via browser.runtime.onMessage:', JSON.parse(JSON.stringify(message || {})));
 
+                    if (message && message.type === 'wblock:pageSupportProbe') {
+                        return Promise.resolve({
+                            ok: true,
+                            host: typeof location !== 'undefined' ? location.hostname : '',
+                            protocol: typeof location !== 'undefined' ? location.protocol : '',
+                        });
+                    }
+
+
                     if (message && message.type === 'wblock:menu:invokeCommand') {
                         return this.invokeMenuCommand(message.bridgeId, message.commandId);
                     }

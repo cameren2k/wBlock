@@ -2,6 +2,8 @@ const NATIVE_HOST_ID = 'application.id';
 const ZAPPER_STORAGE_PREFIX = 'wblock.zapperRules.v1:';
 const ZAPPER_META_PREFIX = 'wblock.zapperMeta.v1:';
 const SUPPORT_PROBE_TIMEOUT_MS = 800;
+const SUPPORT_PROBE_ATTEMPTS = 3;
+const SUPPORT_PROBE_RETRY_DELAY_MS = 150;
 
 function t(key, substitutions, fallback = '') {
     const message = browser.i18n.getMessage(key, substitutions);
@@ -220,6 +222,20 @@ async function getActiveTab() {
     return tabs && tabs.length ? tabs[0] : null;
 }
 
+async function getActiveTabWithRetry() {
+    for (let attempt = 0; attempt < SUPPORT_PROBE_ATTEMPTS; attempt += 1) {
+        const activeTab = await getActiveTab();
+        if (activeTab && typeof activeTab.url === 'string' && activeTab.url.length > 0) {
+            return activeTab;
+        }
+        if (attempt + 1 < SUPPORT_PROBE_ATTEMPTS) {
+            await sleep(SUPPORT_PROBE_RETRY_DELAY_MS);
+        }
+    }
+
+    return getActiveTab();
+}
+
 function getPageSupport(tab) {
     if (!tab || !tab.id || typeof tab.url !== 'string' || tab.url.length === 0) {
         return { supported: false, host: '' };
@@ -237,26 +253,71 @@ function getPageSupport(tab) {
     }
 }
 
+function isSuccessfulTabMessageResponse(response) {
+    return Boolean(response && response.ok === true);
+}
+
+function isSupportedProbeResponse(response) {
+    return Boolean(
+        isSuccessfulTabMessageResponse(response) &&
+        (response.protocol === 'http:' || response.protocol === 'https:') &&
+        typeof response.host === 'string' &&
+        response.host.length > 0
+    );
+}
+
+function isZapperCommandResponse(response) {
+    return Boolean(
+        isSuccessfulTabMessageResponse(response) &&
+        response.handledBy === 'zapper-content'
+    );
+}
+
+async function sendTabMessageWithRetry(tabId, message, { timeoutMs = null, validateResponse = isSuccessfulTabMessageResponse } = {}) {
+    if (!tabId) throw new Error('Missing tab');
+    let lastError = null;
+
+    for (let attempt = 0; attempt < SUPPORT_PROBE_ATTEMPTS; attempt += 1) {
+        try {
+            const messagePromise = browser.tabs.sendMessage(tabId, message);
+            const response = timeoutMs === null
+                ? await messagePromise
+                : await Promise.race([
+                    messagePromise,
+                    new Promise((_, reject) => {
+                        setTimeout(() => reject(new Error('Tab message timed out.')), timeoutMs);
+                    }),
+                ]);
+
+            if (!validateResponse || validateResponse(response)) {
+                return response;
+            }
+
+            lastError = new Error('Unexpected tab message response.');
+        } catch (error) {
+            lastError = error;
+        }
+
+        if (attempt + 1 < SUPPORT_PROBE_ATTEMPTS) {
+            await sleep(SUPPORT_PROBE_RETRY_DELAY_MS);
+        }
+    }
+
+    throw lastError || new Error('Failed to deliver tab message.');
+}
+
 async function probeTabSupport(tabId) {
     if (!tabId) return false;
 
-    const probePromise = browser.tabs.sendMessage(tabId, {
-        type: 'wblock:pageSupportProbe',
-    })
-        .then((response) => Boolean(
-            response &&
-            response.ok === true &&
-            (response.protocol === 'http:' || response.protocol === 'https:') &&
-            typeof response.host === 'string' &&
-            response.host.length > 0
-        ))
-        .catch(() => false);
-
-    const timeoutPromise = new Promise((resolve) => {
-        setTimeout(() => resolve(false), SUPPORT_PROBE_TIMEOUT_MS);
-    });
-
-    return Promise.race([probePromise, timeoutPromise]);
+    try {
+        await sendTabMessageWithRetry(tabId, { type: 'wblock:pageSupportProbe' }, {
+            timeoutMs: SUPPORT_PROBE_TIMEOUT_MS,
+            validateResponse: isSupportedProbeResponse,
+        });
+        return true;
+    } catch {
+        return false;
+    }
 }
 
 function zapperStorageKey(host) {
@@ -597,7 +658,9 @@ function setupListeners() {
         zapperActivate.addEventListener('click', async () => {
             try {
                 setError('');
-                await browser.tabs.sendMessage(tab.id, { type: 'wblock:zapper:activate' });
+                await sendTabMessageWithRetry(tab.id, { type: 'wblock:zapper:activate' }, {
+                    validateResponse: isZapperCommandResponse,
+                });
                 window.close();
             } catch (error) {
                 console.error('[wBlock] Failed to activate zapper:', error);
@@ -687,14 +750,13 @@ async function refreshUi() {
     if (openAppButton) {
         openAppButton.hidden = !(await shouldShowOpenAppButton());
     }
-    tab = await getActiveTab();
+    tab = await getActiveTabWithRetry();
     const pageSupport = getPageSupport(tab);
-    const contentScriptReachable = pageSupport.supported ? await probeTabSupport(tab.id) : false;
-    host = contentScriptReachable ? pageSupport.host : '';
+    host = pageSupport.host;
 
     if (hostEl) hostEl.textContent = host || '—';
 
-    if (!pageSupport.supported || !contentScriptReachable) {
+    if (!pageSupport.supported) {
         setStatus(t('popup_status_unsupported', undefined, 'Unsupported'), 'neutral');
         if (disableToggle) disableToggle.disabled = true;
         if (zapperActivate) zapperActivate.disabled = true;
@@ -704,7 +766,7 @@ async function refreshUi() {
             event: 'popup_support_fallback',
             source: 'popup',
             outcome: 'unsupported',
-            reason: !pageSupport.supported ? 'url_unsupported' : 'probe_unreachable',
+            reason: 'url_unsupported',
             tabId: tab && tab.id ? tab.id : '',
             url: tab && typeof tab.url === 'string' ? tab.url : '',
             host: pageSupport.host,
@@ -714,6 +776,7 @@ async function refreshUi() {
         return;
     }
 
+    const contentScriptReachable = await probeTabSupport(tab.id);
     setStatus(t('popup_status_checking', undefined, 'Checking…'), 'neutral');
 
     const disabled = await getSiteDisabledState(host);
@@ -726,13 +789,15 @@ async function refreshUi() {
         : t('popup_status_active', undefined, 'Active'),
     disabled ? 'disabled' : 'active');
 
+    if (zapperActivate) {
+        zapperActivate.disabled = false;
+    }
     if (rulesToggle) {
         rulesToggle.disabled = false;
     }
     currentZapperRules = await getAuthoritativeZapperRules(host);
     await updateZapperCount(host);
-    renderUserscriptCommands(await fetchUserscriptCommands(tab.id));
-
+    renderUserscriptCommands(contentScriptReachable ? await fetchUserscriptCommands(tab.id) : []);
     if (zapperRulesExpanded) {
         renderZapperRules(currentZapperRules);
     }

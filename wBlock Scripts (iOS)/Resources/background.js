@@ -20661,7 +20661,6 @@ function _toPrimitive(t, r) { if ("object" != typeof t || !t) return t; var e = 
   };
   const POPUP_PATH = "pages/popup/popup.html";
   const SUPPORTED_PAGE_PROTOCOLS = new Set(["http:", "https:"]);
-  const SUPPORT_PROBE_TIMEOUT_MS = 800;
   const canControlActionState = typeof browser !== "undefined" && !!(browser.action && browser.action.enable && browser.action.disable);
   const canSetActionPopup = typeof browser !== "undefined" && !!(browser.action && browser.action.setPopup);
   const canObserveTabs = typeof browser !== "undefined" && !!browser.tabs;
@@ -20810,41 +20809,6 @@ function _toPrimitive(t, r) { if ("object" != typeof t || !t) return t; var e = 
       };
     }
   };
-  const probeTabSupport = async tabId => {
-    if (!canObserveTabs || !browser.tabs.sendMessage || typeof tabId !== "number") {
-      return {
-        reachable: false,
-        reason: "probe_unavailable"
-      };
-    }
-    const probePromise = browser.tabs.sendMessage(tabId, {
-      type: "wblock:pageSupportProbe"
-    }).then(response => {
-      if (response && response.ok === true && SUPPORTED_PAGE_PROTOCOLS.has(response.protocol) && typeof response.host === "string" && response.host.length > 0) {
-        return {
-          reachable: true,
-          reason: "probe_ok",
-          protocol: response.protocol,
-          host: response.host
-        };
-      }
-      return {
-        reachable: false,
-        reason: "probe_invalid_response"
-      };
-    }).catch(error => ({
-      reachable: false,
-      reason: "probe_unreachable",
-      error: String(error && error.message ? error.message : error)
-    }));
-    const timeoutPromise = new Promise(resolve => {
-      setTimeout(() => resolve({
-        reachable: false,
-        reason: "probe_timeout"
-      }), SUPPORT_PROBE_TIMEOUT_MS);
-    });
-    return Promise.race([probePromise, timeoutPromise]);
-  };
   const resolveTabSupport = async tab => {
     if (!tab || typeof tab.id !== "number") {
       return {
@@ -20853,22 +20817,17 @@ function _toPrimitive(t, r) { if ("object" != typeof t || !t) return t; var e = 
       };
     }
     const urlSupport = isSupportedActionUrl(tab.url);
+    if (urlSupport.reason === "missing_url") {
+      return {
+        supported: true,
+        reason: "pending_url",
+        tabId: tab.id
+      };
+    }
     if (!urlSupport.supported) {
       return {
         ...urlSupport,
         tabId: tab.id
-      };
-    }
-    const probeResult = await probeTabSupport(tab.id);
-    if (!probeResult.reachable) {
-      return {
-        supported: false,
-        reason: probeResult.reason,
-        tabId: tab.id,
-        url: urlSupport.url,
-        protocol: urlSupport.protocol,
-        host: urlSupport.host,
-        error: probeResult.error
       };
     }
     return {
@@ -20876,8 +20835,8 @@ function _toPrimitive(t, r) { if ("object" != typeof t || !t) return t; var e = 
       reason: "supported",
       tabId: tab.id,
       url: urlSupport.url,
-      protocol: probeResult.protocol || urlSupport.protocol,
-      host: probeResult.host || urlSupport.host
+      protocol: urlSupport.protocol,
+      host: urlSupport.host
     };
   };
   const syncActionStateForTab = async tab => {
