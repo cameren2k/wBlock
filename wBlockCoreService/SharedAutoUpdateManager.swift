@@ -951,41 +951,54 @@ public actor SharedAutoUpdateManager {
     @discardableResult
     private func streamFilterDataForConversion(
         _ filter: FilterList,
+        includeBaseRules: Bool,
+        hasAffinity: Bool,
+        target: ContentBlockerTargetInfo,
+        allTargets: [ContentBlockerTargetInfo],
         containerURL: URL,
         destinationHandle: FileHandle,
         hasher: inout SHA256,
         newlineData: Data
     ) -> Bool {
-        let primaryURL = containerURL.appendingPathComponent(
-            ContentBlockerIncrementalCache.localFilename(for: filter)
-        )
-        if appendFileContentsToCombinedStream(
-            sourceURL: primaryURL,
-            destinationHandle: destinationHandle,
-            hasher: &hasher,
-            newlineData: newlineData
-        ) {
-            return true
+        guard includeBaseRules || hasAffinity else { return false }
+
+        if hasAffinity {
+            do {
+                return try SafariContentBlockerAffinityProcessor.appendAffinityFilteredContribution(
+                    for: filter,
+                    includeBaseRules: includeBaseRules,
+                    target: target,
+                    allTargets: allTargets,
+                    containerURL: containerURL,
+                    destinationHandle: destinationHandle,
+                    hasher: &hasher,
+                    newlineData: newlineData
+                )
+            } catch {
+                os_log(
+                    "Failed to stream affinity-filtered data from %{public}@ – %{public}@",
+                    log: log,
+                    type: .error,
+                    filter.name,
+                    error.localizedDescription
+                )
+                return false
+            }
         }
 
-        // Backward compatibility: legacy custom filters were stored as "<name>.txt".
-        guard filter.isCustom else { return false }
-        let legacyURL = containerURL.appendingPathComponent("\(filter.name).txt")
-        guard appendFileContentsToCombinedStream(
-            sourceURL: legacyURL,
-            destinationHandle: destinationHandle,
-            hasher: &hasher,
-            newlineData: newlineData
+        guard let sourceURL = SafariContentBlockerAffinityProcessor.sourceURL(
+            for: filter,
+            containerURL: containerURL
         ) else {
             return false
         }
 
-        // Best-effort migration to the stable ID-based filename.
-        if !FileManager.default.fileExists(atPath: primaryURL.path),
-           FileManager.default.fileExists(atPath: legacyURL.path) {
-            try? FileManager.default.moveItem(at: legacyURL, to: primaryURL)
-        }
-        return true
+        return appendFileContentsToCombinedStream(
+            sourceURL: sourceURL,
+            destinationHandle: destinationHandle,
+            hasher: &hasher,
+            newlineData: newlineData
+        )
     }
 
     @discardableResult
@@ -1117,10 +1130,16 @@ public actor SharedAutoUpdateManager {
         // Get disabled sites for injection
         let disabledSites = await getDisabledSites()
 
+        let orderedSelectedFilters = ContentBlockerMappingService.orderedForDistribution(selectedFilters)
         let filtersByTarget = ContentBlockerMappingService.distribute(
             selectedFilters: selectedFilters,
             across: targets
         )
+        let affinityFilterIDs = SafariContentBlockerAffinityProcessor.detectFiltersWithAffinity(
+            orderedSelectedFilters,
+            containerURL: containerURL
+        )
+        let hasAffinityFilters = !affinityFilterIDs.isEmpty
         let mirroredZapperRulesText = await MainActor.run {
             ZapperContentBlockerRuleGenerator.generatedRulesText(
                 from: Dictionary(
@@ -1138,16 +1157,19 @@ public actor SharedAutoUpdateManager {
             try Task.checkCancellation()
 
             let filtersForTarget = filtersByTarget[target] ?? []
+            let assignedFilterIDs = Set(filtersForTarget.map(\.id))
             let rulesFilename = target.rulesFilename
             let extraRulesText = target.slot == 5 ? mirroredZapperRulesText : nil
             let conversionStart = Date()
             var inputWriteDurationMs = 0
             var inputBytes: Int64 = 0
-            let currentSignature = ContentBlockerIncrementalCache.computeInputSignature(
-                filters: filtersForTarget,
-                groupIdentifier: GroupIdentifier.shared.value,
-                extraRulesText: extraRulesText
-            )
+            let currentSignature = hasAffinityFilters
+                ? nil
+                : ContentBlockerIncrementalCache.computeInputSignature(
+                    filters: filtersForTarget,
+                    groupIdentifier: GroupIdentifier.shared.value,
+                    extraRulesText: extraRulesText
+                )
             let storedSignature = ContentBlockerIncrementalCache.loadInputSignature(
                 targetRulesFilename: rulesFilename,
                 groupIdentifier: GroupIdentifier.shared.value
@@ -1171,6 +1193,13 @@ public actor SharedAutoUpdateManager {
                     disabledSites: disabledSites
                 )
             } else {
+                if hasAffinityFilters {
+                    ContentBlockerIncrementalCache.invalidateInputSignature(
+                        targetRulesFilename: rulesFilename,
+                        groupIdentifier: GroupIdentifier.shared.value
+                    )
+                }
+
                 usedCache = false
                 // Rebuild combined raw rules for this target from assigned filters (streaming + hashed).
                 let tempURL = containerURL.appendingPathComponent("temp_autoupdate_\(target.bundleIdentifier).txt")
@@ -1183,10 +1212,14 @@ public actor SharedAutoUpdateManager {
                 defer { try? fileHandle.close() }
                 let inputWriteStart = Date()
 
-                for f in filtersForTarget {
+                for filter in orderedSelectedFilters {
                     try Task.checkCancellation()
                     _ = streamFilterDataForConversion(
-                        f,
+                        filter,
+                        includeBaseRules: assignedFilterIDs.contains(filter.id),
+                        hasAffinity: affinityFilterIDs.contains(filter.id),
+                        target: target,
+                        allTargets: targets,
                         containerURL: containerURL,
                         destinationHandle: fileHandle,
                         hasher: &hasher,
@@ -1397,10 +1430,6 @@ public actor SharedAutoUpdateManager {
     }
 
     // MARK: - Directive Stripping (PREP-07)
-    // Known directives are preserved; all other !# lines are silently stripped.
-    private static let knownDirectivePrefixes: [String] = [
-        "!#include", "!#if", "!#else", "!#endif",
-    ]
 
     private func stripUnknownDirectives(from content: String) -> String {
         var result: [String] = []
@@ -1411,8 +1440,7 @@ public actor SharedAutoUpdateManager {
                 result.append(lineStr)
                 continue
             }
-            let isKnown = Self.knownDirectivePrefixes.contains(where: { trimmed.hasPrefix($0) })
-            if isKnown {
+            if FilterDirectivePolicy.shouldPreserveDirective(trimmed) {
                 result.append(lineStr)
             }
             // Unknown directive: silently omitted (PREP-07)

@@ -166,6 +166,7 @@ extension AppFilterManager {
         }
 
         let platformTargets = ContentBlockerTargetManager.shared.allTargets(forPlatform: self.currentPlatform)
+        let orderedSelectedFilters = ContentBlockerMappingService.orderedForDistribution(allSelectedFilters)
 
         let filtersByTargetInfo = ContentBlockerMappingService.distribute(
             selectedFilters: allSelectedFilters,
@@ -218,6 +219,18 @@ extension AppFilterManager {
         let warningThreshold = Int(Double(ruleLimit) * 0.8)  // 80% threshold
 
         let disabledSites = self.dataManager.disabledSites
+        let affinityFilterIDs: Set<UUID> = await Task.detached(priority: .utility) {
+            guard let containerURL = FileManager.default.containerURL(
+                forSecurityApplicationGroupIdentifier: GroupIdentifier.shared.value
+            ) else {
+                return []
+            }
+
+            return SafariContentBlockerAffinityProcessor.detectFiltersWithAffinity(
+                orderedSelectedFilters,
+                containerURL: containerURL
+            )
+        }.value
 
         for targetInfo in platformTargets {
             let filters = filtersByTargetInfo[targetInfo] ?? []
@@ -242,7 +255,10 @@ extension AppFilterManager {
             let conversionResult = await Task.detached {
                 Self.convertOrReuseTargetRules(
                     filters: filters,
+                    orderedSelectedFilters: orderedSelectedFilters,
+                    affinityFilterIDs: affinityFilterIDs,
                     targetInfo: targetInfo,
+                    allTargets: platformTargets,
                     disabledSites: disabledSites,
                     extraRulesText: extraRulesText,
                     groupIdentifier: GroupIdentifier.shared.value
@@ -549,7 +565,10 @@ extension AppFilterManager {
     /// Memory-efficient conversion that combines filter files using streaming I/O
     nonisolated private static func convertFiltersMemoryEfficient(
         filters: [FilterList],
+        orderedSelectedFilters: [FilterList],
+        affinityFilterIDs: Set<UUID>,
         targetInfo: ContentBlockerTargetInfo,
+        allTargets: [ContentBlockerTargetInfo],
         disabledSites: [String],
         extraRulesText: String?,
         groupIdentifier: String
@@ -574,30 +593,35 @@ extension AppFilterManager {
 
             var hasher = SHA256()
             let newlineData = Data("\n".utf8)
+            let assignedFilterIDs = Set(filters.map(\.id))
 
-            // Stream each filter file directly to temp file
-            for filter in filters {
-                let fileURL = containerURL.appendingPathComponent(
-                    ContentBlockerIncrementalCache.localFilename(for: filter)
-                )
-                if FileManager.default.fileExists(atPath: fileURL.path) {
-                    try Self.appendFileContentsToCombinedStream(
-                        sourceURL: fileURL,
+            // Stream each filter's target-specific contribution directly to the temp file
+            for filter in orderedSelectedFilters {
+                let includeBaseRules = assignedFilterIDs.contains(filter.id)
+                let hasAffinity = affinityFilterIDs.contains(filter.id)
+                guard includeBaseRules || hasAffinity else { continue }
+
+                if hasAffinity {
+                    try SafariContentBlockerAffinityProcessor.appendAffinityFilteredContribution(
+                        for: filter,
+                        includeBaseRules: includeBaseRules,
+                        target: targetInfo,
+                        allTargets: allTargets,
+                        containerURL: containerURL,
                         destinationHandle: fileHandle,
                         hasher: &hasher,
                         newlineData: newlineData
                     )
-                } else if filter.isCustom {
-                    // Backward compatibility: legacy custom filters were stored as "<name>.txt".
-                    let legacyURL = containerURL.appendingPathComponent("\(filter.name).txt")
-                    if FileManager.default.fileExists(atPath: legacyURL.path) {
-                        try Self.appendFileContentsToCombinedStream(
-                            sourceURL: legacyURL,
-                            destinationHandle: fileHandle,
-                            hasher: &hasher,
-                            newlineData: newlineData
-                        )
-                    }
+                } else if let sourceURL = SafariContentBlockerAffinityProcessor.sourceURL(
+                    for: filter,
+                    containerURL: containerURL
+                ) {
+                    try Self.appendFileContentsToCombinedStream(
+                        sourceURL: sourceURL,
+                        destinationHandle: fileHandle,
+                        hasher: &hasher,
+                        newlineData: newlineData
+                    )
                 }
             }
 
@@ -661,17 +685,23 @@ extension AppFilterManager {
 
     nonisolated private static func convertOrReuseTargetRules(
         filters: [FilterList],
+        orderedSelectedFilters: [FilterList],
+        affinityFilterIDs: Set<UUID>,
         targetInfo: ContentBlockerTargetInfo,
+        allTargets: [ContentBlockerTargetInfo],
         disabledSites: [String],
         extraRulesText: String?,
         groupIdentifier: String
     ) -> TargetConversionOutcome {
         let rulesFilename = targetInfo.rulesFilename
-        let currentSignature = ContentBlockerIncrementalCache.computeInputSignature(
-            filters: filters,
-            groupIdentifier: groupIdentifier,
-            extraRulesText: extraRulesText
-        )
+        let hasAffinityFilters = !affinityFilterIDs.isEmpty
+        let currentSignature = hasAffinityFilters
+            ? nil
+            : ContentBlockerIncrementalCache.computeInputSignature(
+                filters: filters,
+                groupIdentifier: groupIdentifier,
+                extraRulesText: extraRulesText
+            )
         let storedSignature = ContentBlockerIncrementalCache.loadInputSignature(
             targetRulesFilename: rulesFilename,
             groupIdentifier: groupIdentifier
@@ -703,9 +733,19 @@ extension AppFilterManager {
             )
         }
 
+        if hasAffinityFilters {
+            ContentBlockerIncrementalCache.invalidateInputSignature(
+                targetRulesFilename: rulesFilename,
+                groupIdentifier: groupIdentifier
+            )
+        }
+
         let conversion = convertFiltersMemoryEfficient(
             filters: filters,
+            orderedSelectedFilters: orderedSelectedFilters,
+            affinityFilterIDs: affinityFilterIDs,
             targetInfo: targetInfo,
+            allTargets: allTargets,
             disabledSites: disabledSites,
             extraRulesText: extraRulesText,
             groupIdentifier: groupIdentifier

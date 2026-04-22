@@ -394,18 +394,9 @@ final class FilterListUpdater: @unchecked Sendable {
         return meaningfulLineCount >= 1
     }
 
-    /// Known directives that are preserved in saved content (for Phase 2/3 processing).
-    /// All other !# directives are stripped before saving.
-    private static let knownDirectivePrefixes: [String] = [
-        "!#include",
-        "!#if",
-        "!#else",
-        "!#endif",
-    ]
-
-    /// Strips unknown !# directives from downloaded filter content.
-    /// Known directives (!#include, !#if, !#else, !#endif) are preserved for Phase 2/3.
-    /// Unknown directives (e.g. !#safari_cb_affinity, !#diff-path) are removed and logged.
+    /// Strips unknown `!#` directives from downloaded filter content.
+    /// Directives used by preprocessing and Safari content blocker affinity are preserved.
+    /// Unknown directives (for example `!#diff-path`) are removed and logged.
     private func stripUnknownDirectives(from content: String) async -> String {
         var result: [String] = []
 
@@ -419,9 +410,7 @@ final class FilterListUpdater: @unchecked Sendable {
                 continue
             }
 
-            // Check if this is a known directive
-            let isKnown = Self.knownDirectivePrefixes.contains(where: { trimmed.hasPrefix($0) })
-            if isKnown {
+            if FilterDirectivePolicy.shouldPreserveDirective(trimmed) {
                 result.append(lineStr)
             } else {
                 // Strip unknown directive and log at debug level
@@ -485,8 +474,7 @@ final class FilterListUpdater: @unchecked Sendable {
                 return false
             }
 
-            // Strip unknown !# directives before validation and saving.
-            // Known directives (!#include, !#if, !#else, !#endif) are preserved for Phase 2/3.
+            // Strip unknown !# directives before validation and saving while preserving preprocessing and affinity directives.
             let processedContent = await stripUnknownDirectives(from: content)
 
             // Measure the pre-expansion rule count (before !#include resolution).

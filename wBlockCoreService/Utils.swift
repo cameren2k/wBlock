@@ -94,6 +94,20 @@ public enum NetworkRequestFactory {
 
 }
 
+public enum FilterDirectivePolicy {
+    private static let preservedPrefixes: [String] = [
+        "!#include",
+        "!#if",
+        "!#else",
+        "!#endif",
+        "!#safari_cb_affinity",
+    ]
+
+    public static func shouldPreserveDirective(_ trimmedLine: String) -> Bool {
+        preservedPrefixes.contains { trimmedLine.hasPrefix($0) }
+    }
+}
+
 public enum ContentBlockerIncrementalCache {
     // Bump when signature inputs/schema change so stale per-target signatures
     // do not suppress needed rebuilds.
@@ -168,6 +182,20 @@ public enum ContentBlockerIncrementalCache {
 
         guard let data = try? JSONEncoder().encode(state) else { return }
         try? data.write(to: url, options: .atomic)
+    }
+
+    public static func invalidateInputSignature(
+        targetRulesFilename: String,
+        groupIdentifier: String
+    ) {
+        guard let url = stateFileURL(
+            targetRulesFilename: targetRulesFilename,
+            groupIdentifier: groupIdentifier
+        ) else {
+            return
+        }
+
+        try? FileManager.default.removeItem(at: url)
     }
 
     public static func hasBaseRulesCache(

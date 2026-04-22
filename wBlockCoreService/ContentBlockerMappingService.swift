@@ -10,6 +10,15 @@ import Foundation
 /// Shared slot-mapping logic used by the app and background auto-update flows.
 /// This keeps target distribution behavior identical across processes.
 public enum ContentBlockerMappingService {
+    public static func orderedForDistribution(_ selectedFilters: [FilterList]) -> [FilterList] {
+        selectedFilters.sorted { lhs, rhs in
+            let lhsCount = lhs.sourceRuleCount ?? 0
+            let rhsCount = rhs.sourceRuleCount ?? 0
+            if lhsCount != rhsCount { return lhsCount > rhsCount }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+    }
+
     /// Distributes selected filters across available content blocker targets by
     /// least-filled estimated source-rule count.
     ///
@@ -30,12 +39,7 @@ public enum ContentBlockerMappingService {
             uniqueKeysWithValues: targets.map { ($0, 0) }
         )
 
-        let sortedFilters = selectedFilters.sorted { lhs, rhs in
-            let lhsCount = lhs.sourceRuleCount ?? 0
-            let rhsCount = rhs.sourceRuleCount ?? 0
-            if lhsCount != rhsCount { return lhsCount > rhsCount }
-            return lhs.id.uuidString < rhs.id.uuidString
-        }
+        let sortedFilters = orderedForDistribution(selectedFilters)
 
         for filter in sortedFilters {
             guard let destination = targets.min(by: {
