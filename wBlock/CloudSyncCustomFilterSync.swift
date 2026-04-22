@@ -27,12 +27,26 @@ enum CloudSyncCustomFilterReconciler {
     }
 
     static func deletedURLsToClearDuringReconciliation(
-        existingDeletedURLs: Set<String>,
+        existingDeletedURLMarkers: [String: TimeInterval],
         remoteCustomURLs: Set<String>,
-        localCustomURLs: Set<String>
+        localCustomURLs: Set<String>,
+        remoteUpdatedAt: TimeInterval
     ) -> Set<String> {
-        normalizedURLs(existingDeletedURLs)
-            .intersection(normalizedURLs(remoteCustomURLs).union(normalizedURLs(localCustomURLs)))
+        let normalizedRemoteCustomURLs = normalizedURLs(remoteCustomURLs)
+        let normalizedLocalCustomURLs = normalizedURLs(localCustomURLs)
+        return Set(
+            existingDeletedURLMarkers.compactMap { rawURL, deletedAt in
+                let normalized = normalizedURL(rawURL)
+                guard !normalized.isEmpty else { return nil }
+                if normalizedLocalCustomURLs.contains(normalized) {
+                    return normalized
+                }
+                guard remoteUpdatedAt > 0 else { return nil }
+                guard normalizedRemoteCustomURLs.contains(normalized) else { return nil }
+                guard deletedAt <= remoteUpdatedAt else { return nil }
+                return normalized
+            }
+        )
     }
 
     private static func deletedURLsToMerge(

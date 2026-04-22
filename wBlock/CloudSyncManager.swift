@@ -566,8 +566,7 @@ final class CloudSyncManager: ObservableObject {
         // Element zapper rules
         await applyRemoteZapperRules(payload.zapperRules ?? [:])
 
-        // Filter lists (selection + custom lists)
-        await applyRemoteFilters(payload.filters)
+        await applyRemoteFilters(payload.filters, remoteUpdatedAt: payload.updatedAt)
 
         // User scripts (remote URLs + local imports)
         await applyRemoteUserScripts(payload.userScripts)
@@ -587,15 +586,16 @@ final class CloudSyncManager: ObservableObject {
         }
     }
 
-    private func applyRemoteFilters(_ filters: SyncPayload.Filters) async {
+    private func applyRemoteFilters(_ filters: SyncPayload.Filters, remoteUpdatedAt: TimeInterval) async {
         let remoteDeleted = Set(filters.deletedCustomURLs ?? [])
         let remoteCustomURLs = Set(filters.customLists.map(\.url))
         let localCustomURLs = currentLocalCustomURLs()
 
         let deletedURLsToClear = CloudSyncCustomFilterReconciler.deletedURLsToClearDuringReconciliation(
-            existingDeletedURLs: deletedCustomURLSet(),
+            existingDeletedURLMarkers: loadDeletedCustomURLMarkers(),
             remoteCustomURLs: remoteCustomURLs,
-            localCustomURLs: localCustomURLs
+            localCustomURLs: localCustomURLs,
+            remoteUpdatedAt: remoteUpdatedAt
         )
         if !deletedURLsToClear.isEmpty {
             clearDeletedCustomListURLs(deletedURLsToClear)
@@ -947,9 +947,10 @@ final class CloudSyncManager: ObservableObject {
         let remoteCustomURLs = Set(remotePayload.filters.customLists.map(\.url))
 
         let deletedURLsToClear = CloudSyncCustomFilterReconciler.deletedURLsToClearDuringReconciliation(
-            existingDeletedURLs: deletedCustomURLSet(),
+            existingDeletedURLMarkers: loadDeletedCustomURLMarkers(),
             remoteCustomURLs: remoteCustomURLs,
-            localCustomURLs: localCustomURLs
+            localCustomURLs: localCustomURLs,
+            remoteUpdatedAt: remotePayload.updatedAt
         )
         if !deletedURLsToClear.isEmpty {
             clearDeletedCustomListURLs(deletedURLsToClear)

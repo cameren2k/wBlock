@@ -49,13 +49,48 @@ struct CloudSyncCustomFilterTests {
         )
 
         let deletedToClear = CloudSyncCustomFilterReconciler.deletedURLsToClearDuringReconciliation(
-            existingDeletedURLs: ["https://example.com/filter.txt"],
+            existingDeletedURLMarkers: ["https://example.com/filter.txt": 100],
             remoteCustomURLs: ["https://example.com/filter.txt"],
-            localCustomURLs: []
+            localCustomURLs: [],
+            remoteUpdatedAt: 200
         )
         expect(
             deletedToClear == ["https://example.com/filter.txt"],
             "live remote custom filters should clear stale local delete markers"
+        )
+
+        let deletedToKeep = CloudSyncCustomFilterReconciler.deletedURLsToClearDuringReconciliation(
+            existingDeletedURLMarkers: ["https://example.com/filter.txt": 300],
+            remoteCustomURLs: ["https://example.com/filter.txt"],
+            localCustomURLs: [],
+            remoteUpdatedAt: 200
+        )
+        expect(
+            deletedToKeep.isEmpty,
+            "a fresh local delete marker should survive an older remote payload during sync"
+        )
+
+        let deletedToClearWithLiveLocal = CloudSyncCustomFilterReconciler.deletedURLsToClearDuringReconciliation(
+            existingDeletedURLMarkers: ["https://example.com/filter.txt": 300],
+            remoteCustomURLs: [],
+            localCustomURLs: ["https://example.com/filter.txt"],
+            remoteUpdatedAt: 200
+        )
+        expect(
+            deletedToClearWithLiveLocal == ["https://example.com/filter.txt"],
+            "a live local custom filter should clear a stale delete marker even when the remote payload is older"
+        )
+
+        let deletedToKeepWithoutFreshRemoteTimestamp = CloudSyncCustomFilterReconciler
+            .deletedURLsToClearDuringReconciliation(
+                existingDeletedURLMarkers: ["https://example.com/filter.txt": 100],
+                remoteCustomURLs: ["https://example.com/filter.txt"],
+                localCustomURLs: [],
+                remoteUpdatedAt: 0
+            )
+        expect(
+            deletedToKeepWithoutFreshRemoteTimestamp.isEmpty,
+            "a remote custom filter with no usable payload timestamp should not clear a delete marker"
         )
 
         print("PASS")
