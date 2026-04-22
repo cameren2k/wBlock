@@ -90,6 +90,10 @@ final class CloudSyncManager: ObservableObject {
     private let recordType = "wBlockSync"
 
     private var cancellables = Set<AnyCancellable>()
+    private var hasActivatedObservers = false
+    private var hasCompletedLaunchSetup = false
+    private var deferredSyncTrigger: String?
+    private var hasPendingExplicitRemoteDownload = false
     private var pendingUploadTask: Task<Void, Never>?
     private var pendingSyncTask: Task<Void, Never>?
     private var isApplyingRemoteChanges: Bool = false
@@ -99,8 +103,28 @@ final class CloudSyncManager: ObservableObject {
     private init() {
         isEnabled = defaults.bool(forKey: Keys.enabled)
         refreshStatusFromDefaults()
+    }
+
+    func activateAfterLaunchSetup() {
+        guard !hasActivatedObservers else { return }
+        hasActivatedObservers = true
+        hasCompletedLaunchSetup = true
         observeLocalSaves()
         observeLocalUserScriptChanges()
+
+        let trigger = deferredSyncTrigger ?? ((isEnabled && !hasPendingExplicitRemoteDownload) ? "Launch" : nil)
+        deferredSyncTrigger = nil
+        guard let trigger else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.syncNow(trigger: trigger)
+        }
+    }
+
+    private func waitUntilLaunchSetupComplete() async {
+        while !hasCompletedLaunchSetup {
+            await Task.yield()
+        }
     }
 
     func recordDeletedCustomListURL(_ urlString: String) {
@@ -167,13 +191,27 @@ final class CloudSyncManager: ObservableObject {
         defaults.set(enabled, forKey: Keys.enabled)
         refreshStatusFromDefaults()
 
-        if enabled && startSync {
+        if !enabled {
+            deferredSyncTrigger = nil
+            return
+        }
+
+        if startSync {
+            guard hasCompletedLaunchSetup else {
+                deferredSyncTrigger = "Enabled"
+                return
+            }
             Task { await syncNow(trigger: "Enabled") }
         }
     }
 
     func startIfEnabled() {
         guard isEnabled else { return }
+        guard hasCompletedLaunchSetup else {
+            deferredSyncTrigger = "Launch"
+            return
+        }
+
         Task {
             await dataManager.waitUntilLoaded()
             await userScriptManager.waitUntilReady()
@@ -183,6 +221,11 @@ final class CloudSyncManager: ObservableObject {
 
     func syncNow(trigger: String) async {
         guard isEnabled else { return }
+        guard hasCompletedLaunchSetup else {
+            deferredSyncTrigger = trigger
+            return
+        }
+
         pendingSyncTask?.cancel()
         var task: Task<Void, Never>?
         task = Task { @MainActor [weak self] in
@@ -222,6 +265,12 @@ final class CloudSyncManager: ObservableObject {
     }
 
     func downloadAndApplyLatestRemoteConfig(trigger: String) async -> Bool {
+        if !hasCompletedLaunchSetup {
+            hasPendingExplicitRemoteDownload = true
+            defer { hasPendingExplicitRemoteDownload = false }
+            await waitUntilLaunchSetupComplete()
+        }
+
         await dataManager.waitUntilLoaded()
         await userScriptManager.waitUntilReady()
 

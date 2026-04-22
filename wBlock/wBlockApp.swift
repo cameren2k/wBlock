@@ -20,6 +20,8 @@ struct wBlockApp: App {
 
     @StateObject private var dataManager = ProtobufDataManager.shared
     @Environment(\.scenePhase) private var scenePhase
+    @State private var hasStartedLaunchSetup = false
+    @State private var hasCompletedLaunchSetup = false
 
     #if os(macOS)
     @State private var showingRestartConfirmation = false
@@ -29,48 +31,58 @@ struct wBlockApp: App {
         dataManager.hasCompletedOnboarding
     }
 
+    private func startLaunchSetupIfNeeded() {
+        guard !hasStartedLaunchSetup else { return }
+        hasStartedLaunchSetup = true
+
+        Task {
+            await dataManager.waitUntilLoaded()
+            await dataManager.migrateLegacyFilterURLs()
+            await dataManager.migrateMultipurposeToAnnoyances()
+            await dataManager.migrateAnnoyancesFilterToSplitFilters()
+            await dataManager.migrateMobileFilterToAdsCategory()
+            await UserScriptManager.shared.waitUntilReady()
+            await MainActor.run {
+                hasCompletedLaunchSetup = true
+                CloudSyncManager.shared.activateAfterLaunchSetup()
+            }
+        }
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView(filterManager: filterManager)
-                    .onAppear {
-                        appDelegate.filterManager = filterManager
-                        CloudSyncManager.shared.attach(filterManager: filterManager)
-                        CloudSyncManager.shared.startIfEnabled()
-                        if appDelegate.hasPendingApplyNotification {
-                            appDelegate.hasPendingApplyNotification = false
-                            NotificationCenter.default.post(name: .applyWBlockChangesNotification, object: nil)
-                        }
+                .onAppear {
+                    appDelegate.filterManager = filterManager
+                    CloudSyncManager.shared.attach(filterManager: filterManager)
+                    if appDelegate.hasPendingApplyNotification {
+                        appDelegate.hasPendingApplyNotification = false
+                        NotificationCenter.default.post(name: .applyWBlockChangesNotification, object: nil)
+                    }
 
-                        // Run migrations (idempotent - only saves if needed)
-                        Task {
-                            await dataManager.migrateLegacyFilterURLs()
-                            await dataManager.migrateMultipurposeToAnnoyances()
-                            await dataManager.migrateAnnoyancesFilterToSplitFilters()
-                            await dataManager.migrateMobileFilterToAdsCategory()
+                    startLaunchSetupIfNeeded()
+                }
+                .onChange(of: scenePhase) { newPhase in
+                    guard newPhase == .active, hasCompletedLaunchSetup else { return }
+                    Task { await CloudSyncManager.shared.syncNow(trigger: "AppActive") }
+                }
+                #if os(macOS)
+                .handlesExternalEvents(preferring: Set(["open"]), allowing: Set(["*"]))
+                .confirmationDialog(
+                    "Restart Onboarding?",
+                    isPresented: $showingRestartConfirmation,
+                    titleVisibility: .visible
+                ) {
+                    Button("Restart", role: .destructive) {
+                        Task { @MainActor in
+                            await dataManager.updateAppSettings(hasCompletedOnboarding: false)
                         }
                     }
-                    .onChange(of: scenePhase) { newPhase in
-                        if newPhase == .active {
-                            Task { await CloudSyncManager.shared.syncNow(trigger: "AppActive") }
-                        }
-                    }
-                    #if os(macOS)
-                    .handlesExternalEvents(preferring: Set(["open"]), allowing: Set(["*"]))
-                    .confirmationDialog(
-                        "Restart Onboarding?",
-                        isPresented: $showingRestartConfirmation,
-                        titleVisibility: .visible
-                    ) {
-                        Button("Restart", role: .destructive) {
-                            Task { @MainActor in
-                                await dataManager.updateAppSettings(hasCompletedOnboarding: false)
-                            }
-                        }
-                        Button("Cancel", role: .cancel) {}
-                    } message: {
-                        Text("This will reset all filters, userscripts, and preferences.")
-                    }
-                    #endif
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("This will reset all filters, userscripts, and preferences.")
+                }
+                #endif
         }
         #if os(macOS)
         .handlesExternalEvents(matching: Set(["open"]))
