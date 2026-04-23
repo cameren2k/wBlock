@@ -48,7 +48,7 @@ public enum UserScriptURLSupport {
     }
 }
 
-public struct UserScriptResource: Codable, Hashable {
+public struct UserScriptResource: Codable, Hashable, Sendable {
     public let name: String
     public let url: String
 
@@ -58,7 +58,7 @@ public struct UserScriptResource: Codable, Hashable {
     }
 }
 
-public struct UserScript: Identifiable, Codable, Hashable {
+public struct UserScript: Identifiable, Codable, Hashable, Sendable {
     public let id: UUID
     public var name: String
     public var url: URL?

@@ -341,36 +341,7 @@ public class UserScriptManager: ObservableObject {
     }
 
     private func readUserScriptResources(_ userScript: UserScript) -> [String: String]? {
-        let fileName = userScriptResourcesFileName(for: userScript)
-
-        // Try fallback directory first (files may exist here initially)
-        if let fallbackURL = fallbackScriptsDirectoryURL {
-            let fileURL = fallbackURL.appendingPathComponent(fileName)
-            if FileManager.default.fileExists(atPath: fileURL.path), let data = try? Data(contentsOf: fileURL) {
-                if let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
-                    // Migrate to group directory if available
-                    if let groupURL = groupScriptsDirectoryURL {
-                        let destURL = groupURL.appendingPathComponent(fileURL.lastPathComponent)
-                        if !FileManager.default.fileExists(atPath: destURL.path) {
-                            try? FileManager.default.copyItem(at: fileURL, to: destURL)
-                        }
-                    }
-                    return decoded
-                }
-            }
-        }
-
-        // Then try group directory
-        if let groupURL = groupScriptsDirectoryURL {
-            let fileURL = groupURL.appendingPathComponent(fileName)
-            if FileManager.default.fileExists(atPath: fileURL.path), let data = try? Data(contentsOf: fileURL) {
-                if let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
-                    return decoded
-                }
-            }
-        }
-
-        return nil
+        Self.readUserScriptResourcesOffMain(userScript)
     }
 
     private func removeUserScriptResourcesFile(_ userScript: UserScript) {
@@ -502,17 +473,10 @@ public class UserScriptManager: ObservableObject {
         }
 
         // Update content from stored files (do file I/O off main thread)
-        let scriptsToLoad = newUserScripts
-        let updatedScripts = await Task.detached { [weak self] () -> [UserScript] in
-            guard let self = self else { return scriptsToLoad }
-            var scripts = scriptsToLoad
-            for i in 0..<scripts.count {
-                if let content = await Self.readUserScriptContentOffMain(scripts[i]) {
-                    scripts[i].content = content
-                }
-            }
-            return scripts
-        }.value
+        let updatedScripts = await hydrateUserScriptsFromDisk(
+            newUserScripts,
+            includeResources: false
+        )
 
         // Only update if the scripts have actually changed to avoid unnecessary UI updates
         if !areUserScriptsEqual(userScripts, updatedScripts) {
@@ -521,26 +485,110 @@ public class UserScriptManager: ObservableObject {
         }
     }
 
+    private func hydrateUserScriptsFromDisk(
+        _ userScripts: [UserScript],
+        includeResources: Bool
+    ) async -> [UserScript] {
+        await Task.detached {
+            Self.hydrateUserScriptsFromDiskOffMain(
+                userScripts,
+                includeResources: includeResources
+            )
+        }.value
+    }
+
+    nonisolated private static func hydrateUserScriptsFromDiskOffMain(
+        _ userScripts: [UserScript],
+        includeResources: Bool
+    ) -> [UserScript] {
+        var scripts = userScripts
+        for i in scripts.indices {
+            if let content = readUserScriptContentOffMain(scripts[i]) {
+                scripts[i].content = content
+            }
+
+            guard includeResources else { continue }
+            if let resources = readUserScriptResourcesOffMain(scripts[i]) {
+                scripts[i].resourceContents = resources
+            }
+        }
+        return scripts
+    }
+
     /// Read userscript content off the main thread
     nonisolated private static func readUserScriptContentOffMain(_ userScript: UserScript) -> String? {
         // Try fallback directory first
         if let fallbackURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("wBlock").appendingPathComponent("userscripts") {
+            .appendingPathComponent("wBlock").appendingPathComponent("userscripts")
+        {
             let fileURL = fallbackURL.appendingPathComponent("\(userScript.id.uuidString).user.js")
             if FileManager.default.fileExists(atPath: fileURL.path),
-               let content = try? String(contentsOf: fileURL, encoding: .utf8) {
+                let content = try? String(contentsOf: fileURL, encoding: .utf8)
+            {
+                if let groupURL = FileManager.default.containerURL(
+                    forSecurityApplicationGroupIdentifier: GroupIdentifier.shared.value
+                )?.appendingPathComponent("userscripts") {
+                    let destURL = groupURL.appendingPathComponent(fileURL.lastPathComponent)
+                    try? FileManager.default.copyItem(at: fileURL, to: destURL)
+                }
                 return content
             }
         }
+
         // Then try group directory
-        if let groupURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: GroupIdentifier.shared.value)?
-            .appendingPathComponent("userscripts") {
+        if let groupURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: GroupIdentifier.shared.value
+        )?.appendingPathComponent("userscripts") {
             let fileURL = groupURL.appendingPathComponent("\(userScript.id.uuidString).user.js")
             if FileManager.default.fileExists(atPath: fileURL.path),
-               let content = try? String(contentsOf: fileURL, encoding: .utf8) {
+                let content = try? String(contentsOf: fileURL, encoding: .utf8)
+            {
                 return content
             }
         }
+        return nil
+    }
+
+    /// Read cached userscript resources off the main thread
+    nonisolated private static func readUserScriptResourcesOffMain(
+        _ userScript: UserScript
+    ) -> [String: String]? {
+        let fileName = "\(userScript.id.uuidString).resources.json"
+
+        // Try fallback directory first (files may exist here initially)
+        if let fallbackURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("wBlock").appendingPathComponent("userscripts")
+        {
+            let fileURL = fallbackURL.appendingPathComponent(fileName)
+            if FileManager.default.fileExists(atPath: fileURL.path),
+                let data = try? Data(contentsOf: fileURL),
+                let decoded = try? JSONDecoder().decode([String: String].self, from: data)
+            {
+                if let groupURL = FileManager.default.containerURL(
+                    forSecurityApplicationGroupIdentifier: GroupIdentifier.shared.value
+                )?.appendingPathComponent("userscripts") {
+                    let destURL = groupURL.appendingPathComponent(fileURL.lastPathComponent)
+                    if !FileManager.default.fileExists(atPath: destURL.path) {
+                        try? FileManager.default.copyItem(at: fileURL, to: destURL)
+                    }
+                }
+                return decoded
+            }
+        }
+
+        // Then try group directory
+        if let groupURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: GroupIdentifier.shared.value
+        )?.appendingPathComponent("userscripts") {
+            let fileURL = groupURL.appendingPathComponent(fileName)
+            if FileManager.default.fileExists(atPath: fileURL.path),
+                let data = try? Data(contentsOf: fileURL),
+                let decoded = try? JSONDecoder().decode([String: String].self, from: data)
+            {
+                return decoded
+            }
+        }
+
         return nil
     }
 
@@ -874,25 +922,36 @@ public class UserScriptManager: ObservableObject {
             logger.info("📖 No userscripts found after default check, loading defaults")
             loadDefaultUserScripts()
         } else {
-            // Update content from stored files
-            for i in 0..<userScripts.count {
-                let script = userScripts[i]
+            let hydratedScripts = await hydrateUserScriptsFromDisk(
+                userScripts,
+                includeResources: true
+            )
+
+            for script in hydratedScripts {
                 logger.info("📖 Loading content for script: \(script.name) (ID: \(script.id))")
                 logger.info("📖 Script enabled: \(script.isEnabled), matches: \(script.matches)")
 
-                if let content = readUserScriptContent(userScripts[i]) {
-                    userScripts[i].content = content
-                    logger.info("✅ Loaded content for \(script.name) (\(content.count) characters)")
-                } else {
+                if script.content.isEmpty {
                     logger.warning("⚠️ Failed to load content for \(script.name)")
+                } else {
+                    logger.info(
+                        "✅ Loaded content for \(script.name) (\(script.content.count) characters)")
                 }
 
-                if let resources = readUserScriptResources(userScripts[i]) {
-                    userScripts[i].resourceContents = resources
-                    logger.info("✅ Loaded \(resources.count) cached resources for \(script.name)")
+                if !script.resourceContents.isEmpty {
+                    logger.info(
+                        "✅ Loaded \(script.resourceContents.count) cached resources for \(script.name)")
                 }
             }
+
+            userScripts = hydratedScripts
         }
+
+        // Only download scripts that are enabled but missing content (e.g., from migration).
+        Task {
+            await downloadMissingDefaultScripts()
+        }
+
     }
 
     private func migrateEmbeddedProtobufContentToFilesIfNeeded() -> (
@@ -966,11 +1025,6 @@ public class UserScriptManager: ObservableObject {
             }
         } else {
             logger.info("ℹ️ No missing default scripts to add")
-        }
-
-        // Only download scripts that are enabled but missing content (e.g., from migration).
-        Task {
-            await downloadMissingDefaultScripts()
         }
     }
 
@@ -1372,30 +1426,7 @@ public class UserScriptManager: ObservableObject {
     }
 
     private func readUserScriptContent(_ userScript: UserScript) -> String? {
-        // Try fallback directory first (files may exist here initially)
-        if let fallbackURL = fallbackScriptsDirectoryURL {
-            let fileURL = fallbackURL.appendingPathComponent("\(userScript.id.uuidString).user.js")
-            if FileManager.default.fileExists(atPath: fileURL.path),
-                let content = try? String(contentsOf: fileURL, encoding: .utf8)
-            {
-                // Migrate to group directory if available
-                if let groupURL = groupScriptsDirectoryURL {
-                    let destURL = groupURL.appendingPathComponent(fileURL.lastPathComponent)
-                    try? FileManager.default.copyItem(at: fileURL, to: destURL)
-                }
-                return content
-            }
-        }
-        // Then try group directory
-        if let groupURL = groupScriptsDirectoryURL {
-            let fileURL = groupURL.appendingPathComponent("\(userScript.id.uuidString).user.js")
-            if FileManager.default.fileExists(atPath: fileURL.path),
-                let content = try? String(contentsOf: fileURL, encoding: .utf8)
-            {
-                return content
-            }
-        }
-        return nil
+        Self.readUserScriptContentOffMain(userScript)
     }
 
     private func writeUserScriptContent(_ userScript: UserScript) -> Bool {
