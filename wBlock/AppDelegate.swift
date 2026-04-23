@@ -59,7 +59,7 @@ class AppDelegate: NSObject {
     private let maxAppRefreshDelayHours: Double = 12.0
 
     /// Minimum schedule delay for background processing (in hours)
-    private let minProcessingDelayHours: Double = 2.0
+    private let minProcessingDelayHours: Double = 1.0
     /// Maximum schedule delay for background processing (in hours)
     private let maxProcessingDelayHours: Double = 24.0
     #endif
@@ -621,6 +621,12 @@ extension AppDelegate: UIApplicationDelegate {
         onExpiration: @escaping @MainActor (AppDelegate) -> Void
     ) {
         os_log("%{public}@ started", type: .info, taskLabel)
+        // Queue the next requests immediately so an unexpected termination during this run
+        // does not leave background updates unscheduled until the user opens the app again.
+        Task { @MainActor in
+            self.scheduleBackgroundFilterUpdate()
+            self.scheduleBackgroundProcessingUpdate()
+        }
         let completionState = BGTaskCompletionState()
         let updateTask = Task {
             await ProtobufDataManager.shared.recordAutoUpdateTaskStart(kind)
